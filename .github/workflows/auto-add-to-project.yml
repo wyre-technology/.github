@@ -10,7 +10,20 @@ jobs:
   add-to-project:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/add-to-project@v1.0.2
+      - name: Check for PROJECT_TOKEN
+        id: check
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::PROJECT_TOKEN secret is not configured for this repo — skipping auto-add-to-project. Add a PAT with project read/write scope at the org or repo level to enable."
+          else
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.has_token == 'true'
+        uses: actions/add-to-project@v1.0.2
         with:
           project-url: https://github.com/orgs/wyre-technology/projects/1
           github-token: ${{ secrets.PROJECT_TOKEN }}
