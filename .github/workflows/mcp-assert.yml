@@ -1,0 +1,38 @@
+name: mcp-assert
+
+on:
+  workflow_call:
+    inputs:
+      entry:
+        description: 'Path to the MCP server entry point (e.g. dist/index.js)'
+        type: string
+        required: true
+      canary-tool:
+        description: 'Name of one tool to use for protocol-level assertions (any read-only tool)'
+        type: string
+        required: true
+      extra-suite:
+        description: 'Optional path to a repo-local evals/ directory to run alongside the baseline'
+        type: string
+        default: ''
+      node-version:
+        description: 'Node.js version to use'
+        type: string
+        default: '20'
+
+jobs:
+  assert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build --if-present
+      - uses: wyre-technology/mcp-eval-baseline@v1
+        with:
+          entry: ${{ inputs.entry }}
+          canary-tool: ${{ inputs.canary-tool }}
+          extra-suite: ${{ inputs.extra-suite }}
