@@ -1,0 +1,125 @@
+name: pr-spam-triage
+
+# Reusable workflow that auto-closes obvious promotional / badge-spam PRs.
+#
+# Safe under pull_request_target: we never check out PR head code. We only
+# read PR metadata via the API and pass any PR-derived strings through env
+# vars (never via direct ${{ }} interpolation in run: blocks).
+
+on:
+  workflow_call:
+    inputs:
+      extra-denied-authors:
+        description: 'JSON array of additional GitHub usernames to auto-close.'
+        type: string
+        default: '[]'
+      extra-title-patterns:
+        description: 'JSON array of additional case-insensitive regex patterns for PR title.'
+        type: string
+        default: '[]'
+      extra-body-patterns:
+        description: 'JSON array of additional case-insensitive regex patterns for PR body.'
+        type: string
+        default: '[]'
+      dry-run:
+        description: 'If true, label only; do not close. Useful for tuning.'
+        type: boolean
+        default: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Evaluate PR against spam signals
+        id: evaluate
+        uses: actions/github-script@v7
+        env:
+          EXTRA_AUTHORS: ${{ inputs.extra-denied-authors }}
+          EXTRA_TITLES: ${{ inputs.extra-title-patterns }}
+          EXTRA_BODIES: ${{ inputs.extra-body-patterns }}
+        with:
+          script: |
+            const baseAuthors = ['mseep-ai', 'mseep-bot'];
+            const baseTitlePatterns = [
+              /^add .{0,40}badge/i,
+              /security assessment badge/i,
+              /add (mseep|trust|verified) badge/i,
+            ];
+            const baseBodyPatterns = [
+              /mseep\.(ai|net)/i,
+              /security assessment badge/i,
+            ];
+
+            const parseList = (raw, transform) => {
+              try {
+                const arr = JSON.parse(raw || '[]');
+                return Array.isArray(arr) ? arr.map(transform) : [];
+              } catch (e) {
+                core.warning(`Could not parse input as JSON array: ${raw}`);
+                return [];
+              }
+            };
+
+            const authors = new Set([
+              ...baseAuthors,
+              ...parseList(process.env.EXTRA_AUTHORS, (s) => String(s).toLowerCase()),
+            ]);
+            const titlePatterns = [
+              ...baseTitlePatterns,
+              ...parseList(process.env.EXTRA_TITLES, (s) => new RegExp(s, 'i')),
+            ];
+            const bodyPatterns = [
+              ...baseBodyPatterns,
+              ...parseList(process.env.EXTRA_BODIES, (s) => new RegExp(s, 'i')),
+            ];
+
+            const pr = context.payload.pull_request;
+            const author = (pr.user?.login || '').toLowerCase();
+            const title = pr.title || '';
+            const body = pr.body || '';
+
+            const reasons = [];
+            if (authors.has(author)) reasons.push(`author on denylist`);
+            if (titlePatterns.some((re) => re.test(title))) reasons.push(`title matches spam pattern`);
+            if (bodyPatterns.some((re) => re.test(body))) reasons.push(`body matches spam pattern`);
+
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 10,
+            });
+            const onlyReadme = files.length === 1 && /^readme/i.test(files[0].filename);
+            const tinyDiff = pr.additions <= 5 && pr.deletions === 0;
+            if (onlyReadme && tinyDiff && reasons.length > 0) {
+              reasons.push('README-only tiny diff');
+            }
+
+            const matched = reasons.length > 0;
+            core.setOutput('matched', String(matched));
+            core.setOutput('reasons', reasons.join('; '));
+
+      - name: Label as spam-suspected (dry-run)
+        if: steps.evaluate.outputs.matched == 'true' && inputs.dry-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REASONS: ${{ steps.evaluate.outputs.reasons }}
+        run: |
+          gh pr edit "$PR_NUMBER" --add-label "spam-suspected" --repo "$GITHUB_REPOSITORY"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Triage: matched spam heuristics ($REASONS). Flagged for review (dry-run)."
+
+      - name: Close as spam
+        if: steps.evaluate.outputs.matched == 'true' && !inputs.dry-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REASONS: ${{ steps.evaluate.outputs.reasons }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "Closing automatically — matched promotional/badge-spam heuristics ($REASONS). We don't accept unsolicited third-party badges in our READMEs. If this was in error, please open an issue first."
+          gh pr close "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
