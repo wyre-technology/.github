@@ -3,12 +3,20 @@ name: mcp-assert
 on:
   workflow_call:
     inputs:
-      suite:
-        description: Path to the eval suite directory
+      entry:
+        description: 'Path to the MCP server entry point (e.g. dist/index.js)'
         type: string
-        default: evals/
+        required: true
+      canary-tool:
+        description: 'Name of one tool to use for protocol-level assertions (any read-only tool)'
+        type: string
+        required: true
+      extra-suite:
+        description: 'Optional path to a repo-local evals/ directory to run alongside the baseline'
+        type: string
+        default: ''
       node-version:
-        description: Node.js version to use
+        description: 'Node.js version to use'
         type: string
         default: '20'
 
@@ -23,6 +31,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build --if-present
-      - uses: blackwell-systems/mcp-assert-action@v1
+      - uses: wyre-technology/mcp-eval-baseline@v1
         with:
-          suite: ${{ inputs.suite }}
+          entry: ${{ inputs.entry }}
+          canary-tool: ${{ inputs.canary-tool }}
+          extra-suite: ${{ inputs.extra-suite }}
