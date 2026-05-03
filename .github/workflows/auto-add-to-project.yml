@@ -5,25 +5,42 @@ on:
     types: [opened]
   pull_request:
     types: [opened]
+  workflow_call:
+    secrets:
+      APP_ID:
+        required: true
+      APP_PRIVATE_KEY:
+        required: true
 
 jobs:
   add-to-project:
     runs-on: ubuntu-latest
     steps:
-      - name: Check for PROJECT_TOKEN
+      - name: Check App credentials
         id: check
         env:
-          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
-          if [ -z "$PROJECT_TOKEN" ]; then
-            echo "has_token=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PROJECT_TOKEN secret is not configured for this repo — skipping auto-add-to-project. Add a PAT with project read/write scope at the org or repo level to enable."
+          if [ -z "$APP_ID" ] || [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::APP_ID or APP_PRIVATE_KEY not configured - skipping auto-add-to-project."
           else
-            echo "has_token=true" >> "$GITHUB_OUTPUT"
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - if: steps.check.outputs.has_token == 'true'
+      - name: Mint installation token
+        id: app-token
+        if: steps.check.outputs.has_creds == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: wyre-technology
+
+      - name: Add issue/PR to project
+        if: steps.check.outputs.has_creds == 'true'
         uses: actions/add-to-project@v1.0.2
         with:
           project-url: https://github.com/orgs/wyre-technology/projects/1
-          github-token: ${{ secrets.PROJECT_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
