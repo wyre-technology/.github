@@ -29,7 +29,10 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
+          registry-url: 'https://npm.pkg.github.com'
       - run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run build --if-present
       - uses: wyre-technology/mcp-eval-baseline@v1
         with:
