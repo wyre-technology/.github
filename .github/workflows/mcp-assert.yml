@@ -24,8 +24,8 @@ jobs:
   assert:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
@@ -34,7 +34,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run build --if-present
-      - uses: wyre-technology/mcp-eval-baseline@v1
+      - uses: wyre-technology/mcp-eval-baseline@bbcd7891e9d0904855130959366f58d6f68e01c8 # v1
         with:
           entry: ${{ inputs.entry }}
           canary-tool: ${{ inputs.canary-tool }}
