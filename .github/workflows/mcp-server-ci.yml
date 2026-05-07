@@ -1,0 +1,149 @@
+name: MCP Server CI (reusable)
+
+# Canonical CI workflow for wyre-technology/*-mcp repositories.
+# Called from each per-repo `.github/workflows/ci.yml` via `uses:`.
+#
+# What this workflow does:
+#   - npm ci with GitHub Packages auth for @wyre-technology/* deps
+#   - Lint, build, unit test on a configurable Node matrix
+#   - Integration test step gated on secret presence (skips on dependabot/fork PRs)
+#   - Optional Docker build smoke test
+#
+# Failure patterns this prevents (see related skills in ~/.claude/skills):
+#   - npm 401 fetching @wyre-technology/* (ghcr-npm-auth-in-ci)
+#   - NetworkError on every dependabot PR (ci-gate-integration-tests-on-secrets)
+#
+# Repo callers should pass `integration-secret-name` to enable secret gating.
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        description: 'JSON array of Node.js versions to matrix-test (default LTS-only).'
+        type: string
+        default: '["20"]'
+      lint:
+        description: 'Run `npm run lint` if a lint script is defined.'
+        type: boolean
+        default: true
+      build:
+        description: 'Run `npm run build` if a build script is defined.'
+        type: boolean
+        default: true
+      unit-test-script:
+        description: 'npm script to run for unit tests.'
+        type: string
+        default: 'test'
+      integration-test-script:
+        description: 'npm script to run for integration tests, only when integration secrets are present.'
+        type: string
+        default: ''
+      integration-secret-name:
+        description: 'Name of the secret whose presence gates integration tests (e.g. VENDOR_API_KEY). Empty disables integration step.'
+        type: string
+        default: ''
+      docker-smoke-test:
+        description: 'Build the Dockerfile as a smoke test (no push).'
+        type: boolean
+        default: false
+      environment:
+        description: 'GitHub Environment to run in (for env-scoped secrets, e.g. "Default").'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(inputs.node-versions) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@wyre-technology'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        if: inputs.lint
+        run: |
+          if [ -n "$(node -p "require('./package.json').scripts?.lint || ''")" ]; then
+            npm run lint
+          else
+            echo "::notice::No lint script defined — skipping."
+          fi
+
+      - name: Build
+        if: inputs.build
+        run: |
+          if [ -n "$(node -p "require('./package.json').scripts?.build || ''")" ]; then
+            npm run build
+          else
+            echo "::notice::No build script defined — skipping."
+          fi
+
+      - name: Unit tests
+        run: npm run ${{ inputs.unit-test-script }}
+
+      - name: Detect integration secrets
+        if: inputs.integration-test-script != '' && inputs.integration-secret-name != ''
+        shell: bash
+        env:
+          # secrets[<dynamic>] resolves to '' when secret is absent (forks/dependabot)
+          PROBE_VALUE: ${{ secrets[inputs.integration-secret-name] }}
+        run: |
+          if [ -n "$PROBE_VALUE" ]; then
+            echo "HAS_INTEGRATION_SECRETS=true" >> "$GITHUB_ENV"
+          else
+            echo "HAS_INTEGRATION_SECRETS=false" >> "$GITHUB_ENV"
+            echo "::notice::Skipping integration tests — secret not configured for this run (expected on fork/dependabot PRs)."
+          fi
+
+      - name: Integration tests
+        if: inputs.integration-test-script != '' && env.HAS_INTEGRATION_SECRETS == 'true'
+        run: npm run ${{ inputs.integration-test-script }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+  docker-smoke:
+    name: Docker build smoke test
+    if: inputs.docker-smoke-test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - name: Write npmrc for build context
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            printf '//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN"
+            printf '@wyre-technology:registry=https://npm.pkg.github.com\n'
+            printf 'always-auth=true\n'
+          } > /tmp/npmrc
+      - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.18.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: smoke-test:latest
+          secret-files: |
+            npmrc=/tmp/npmrc
