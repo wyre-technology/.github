@@ -26,6 +26,10 @@ on:
         description: 'Run `npm run lint` if a lint script is defined.'
         type: boolean
         default: true
+      typecheck:
+        description: 'Run `npm run typecheck` if a typecheck script is defined.'
+        type: boolean
+        default: true
       build:
         description: 'Run `npm run build` if a build script is defined.'
         type: boolean
@@ -92,6 +96,15 @@ jobs:
             npm run lint
           else
             echo "::notice::No lint script defined — skipping."
+          fi
+
+      - name: Typecheck
+        if: inputs.typecheck
+        run: |
+          if [ -n "$(node -p "require('./package.json').scripts?.typecheck || ''")" ]; then
+            npm run typecheck
+          else
+            echo "::notice::No typecheck script defined — skipping."
           fi
 
       - name: Build
