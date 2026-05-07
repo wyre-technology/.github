@@ -46,6 +46,10 @@ on:
         description: 'Build the Dockerfile as a smoke test (no push).'
         type: boolean
         default: false
+      lint-destructive-warnings:
+        description: 'Run scripts/lint-destructive-warnings.mjs against src (used by *-mcp repos with destructive-action tools).'
+        type: boolean
+        default: false
       environment:
         description: 'GitHub Environment to run in (for env-scoped secrets, e.g. "Default").'
         type: string
@@ -97,6 +101,15 @@ jobs:
             npm run build
           else
             echo "::notice::No build script defined — skipping."
+          fi
+
+      - name: Lint destructive-tool warnings
+        if: inputs.lint-destructive-warnings
+        run: |
+          if [ -f scripts/lint-destructive-warnings.mjs ]; then
+            node scripts/lint-destructive-warnings.mjs src
+          else
+            echo "::notice::scripts/lint-destructive-warnings.mjs not found — skipping."
           fi
 
       - name: Unit tests
