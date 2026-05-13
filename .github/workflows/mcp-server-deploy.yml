@@ -36,7 +36,7 @@ on:
         required: true
         type: string
       digest:
-        description: 'Image digest (e.g. `sha256:abc123...`) produced by the caller''s `docker/build-push-action` step. Pass via `${{ needs.docker.outputs.digest }}`.'
+        description: 'Image digest (e.g. `sha256:abc123...`) produced by the callers `docker/build-push-action` step. Pass via the docker jobs `outputs.digest` (which itself wraps `steps.<push-id>.outputs.digest`).'
         required: true
         type: string
       version:
