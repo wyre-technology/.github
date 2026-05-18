@@ -105,3 +105,37 @@ jobs:
             --resource-group "${RESOURCE_GROUP}" \
             --image "${IMAGE}" \
             --set-env-vars "IMAGE_VERSION=v${RELEASE_VERSION}-sha-${SHORT_SHA}-${GITHUB_RUN_ID}"
+
+      # Route the container app's platform metrics (AllMetrics — includes
+      # CpuPercentage / MemoryPercentage) to the shared Log Analytics
+      # workspace. This is what feeds the fleet-wide vendor CPU/memory
+      # saturation alert (conduit observability.bicep ->
+      # alertVendorResourceSaturation, which queries the AzureMetrics table).
+      #
+      # Applied here, in the canonical deploy workflow, so it is templated
+      # ONCE across all ~40 gwp-* repos rather than hand-maintained per repo.
+      # diagnostic-settings create is idempotent — re-running with the same
+      # --name updates in place — so every release self-heals the setting.
+      #
+      # Permission: the deploy SP holds Contributor on the resource group,
+      # which covers Microsoft.Insights/diagnosticSettings/write. No extra
+      # grant is needed.
+      - name: Route container metrics to Log Analytics
+        env:
+          LOG_ANALYTICS_WORKSPACE: mcpgw-prod-logs
+        run: |
+          set -euo pipefail
+
+          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          ACA_ID=$(az containerapp show \
+            --name "${TARGET_ACA}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query id -o tsv)
+          WORKSPACE_ID="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${LOG_ANALYTICS_WORKSPACE}"
+
+          echo "Ensuring AllMetrics diagnostic setting on ${TARGET_ACA} -> ${LOG_ANALYTICS_WORKSPACE}"
+          az monitor diagnostic-settings create \
+            --name gwp-metrics-to-law \
+            --resource "${ACA_ID}" \
+            --workspace "${WORKSPACE_ID}" \
+            --metrics '[{"category":"AllMetrics","enabled":true}]'
