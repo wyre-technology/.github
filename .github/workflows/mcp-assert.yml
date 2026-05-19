@@ -20,6 +20,13 @@ on:
         type: string
         default: '20'
 
+# Required so GITHUB_TOKEN can read @wyre-technology/* packages from
+# GitHub Packages during `npm ci`. Without packages:read, npm ci 401s
+# on the sibling node-<vendor> SDK. See ghcr-npm-auth-in-ci skill.
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   assert:
     runs-on: ubuntu-latest
@@ -30,6 +37,7 @@ jobs:
           node-version: ${{ inputs.node-version }}
           cache: 'npm'
           registry-url: 'https://npm.pkg.github.com'
+          scope: '@wyre-technology'
       - run: npm ci
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
