@@ -1,0 +1,256 @@
+name: MCP Server Release (reusable)
+
+# Canonical release workflow for wyre-technology/*-mcp repositories.
+# Called from each per-repo `.github/workflows/release.yml` for the
+# semantic-release → Docker push → MCP Registry publish chain.
+#
+# BUG THIS FIXES (Tier A registry coverage gap — issue #16):
+#   Per-repo `Get released version` steps used:
+#       VERSION=$(node -e 'process.stdout.write(require("./package.json").version)')
+#   Node ≥22.12 respects "type":"module" in the nearest package.json when
+#   running --eval / --print scripts, making require() unavailable in ESM
+#   repos. The ReferenceError is swallowed inside $() — bash set -e does not
+#   fire on command-substitution failures — so VERSION silently becomes "".
+#   The release job exits 0 with an empty `version` output. The docker job
+#   runs (release succeeded), hits the "RELEASE_VERSION is empty" guard, and
+#   fails. With docker failed, the mcp-registry job's needs: [release, docker]
+#   cascades to `skipped` (not `failed`), so the registry never hears about
+#   the release. autotask-mcp is unaffected because it has no "type":"module".
+#
+#   Fix: use `jq -r '.version' package.json` — jq is pre-installed on all
+#   GitHub-hosted Ubuntu runners, is immune to Node.js module-system context,
+#   and cannot silently return empty for a well-formed package.json.
+#
+# Gating contract:
+#   docker       ← runs only when release.outputs.released == 'true'
+#   mcp-registry ← runs only when released == 'true' AND docker succeeded
+#                  (needs: [release, docker] propagates docker-skipped/failed
+#                  → mcp-registry-skipped automatically)
+
+on:
+  workflow_call:
+    inputs:
+      server-name:
+        description: >
+          Server slug used in the MCP Registry search query
+          (e.g. "atera-mcp" → queries io.github.wyre-technology/atera-mcp).
+        required: true
+        type: string
+      image-name:
+        description: >
+          Full GHCR image path without tag or digest,
+          e.g. "ghcr.io/wyre-technology/atera-mcp".
+        required: true
+        type: string
+      node-version:
+        description: 'Node.js version for install, build, and semantic-release.'
+        required: false
+        type: string
+        default: '22'
+      platforms:
+        description: 'Docker target platform(s). Comma-separated for multi-arch.'
+        required: false
+        type: string
+        default: 'linux/amd64'
+    outputs:
+      version:
+        description: 'Released semver (no "v" prefix). Empty string when no release was cut.'
+        value: ${{ jobs.release.outputs.version }}
+      released:
+        description: '"true" when semantic-release cut a new release; "false" otherwise.'
+        value: ${{ jobs.release.outputs.released }}
+      tag_name:
+        description: 'Git tag created (e.g. "v1.5.0"). Empty when no release was cut.'
+        value: ${{ jobs.release.outputs.tag_name }}
+      digest:
+        description: 'Docker push digest (sha256:…). Empty when no release was cut.'
+        value: ${{ jobs.docker.outputs.digest }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # semantic-release
+  # ────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      version:  ${{ steps.release-version.outputs.version }}
+      released: ${{ steps.release-version.outputs.released }}
+      tag_name: ${{ steps.release-version.outputs.tag_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@wyre-technology'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: npm run build
+
+      - name: Semantic Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+      - name: Get released version
+        id: release-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Use jq, not node -e / node -p.
+          #
+          # Root-cause fix: Node ≥22.12 respects "type":"module" in the nearest
+          # package.json when evaluating --eval/--print scripts. In ESM scope
+          # require() is undefined — the ReferenceError is silently swallowed
+          # inside $() because bash set -e does not fire on command-substitution
+          # failures. VERSION becomes "", the job exits 0, docker receives an
+          # empty `needs.release.outputs.version`, and mcp-registry is silently
+          # skipped. jq is pre-installed on every GitHub-hosted Ubuntu runner
+          # and is independent of the Node.js module system.
+          VERSION=$(jq -r '.version' package.json)
+          TAG="v${VERSION}"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG}"      >> "$GITHUB_OUTPUT"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" &>/dev/null; then
+            echo "released=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Docker build + GHCR push
+  # Gated: only runs when a real release was cut.
+  # ────────────────────────────────────────────────────────────────────────────
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [release]
+    # Skip entirely when no release was cut. This replaces the prior pattern
+    # where docker ran unconditionally and failed inside the job when
+    # needs.release.outputs.version was empty — which then silently skipped
+    # mcp-registry via the needs: [release, docker] cascade.
+    if: needs.release.outputs.released == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5.10.0
+        with:
+          images: ${{ inputs.image-name }}
+          tags: |
+            type=semver,pattern={{version}},value=v${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.release.outputs.version }}
+            type=semver,pattern={{major}},value=v${{ needs.release.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
+        with:
+          context: .
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: |
+            ${{ inputs.image-name }}:latest
+            ${{ inputs.image-name }}:v${{ needs.release.outputs.version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ needs.release.outputs.version }}
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # MCP Registry publish
+  # Gated: released == 'true' AND docker succeeded.
+  # needs: [release, docker] means a skipped or failed docker job
+  # automatically skips mcp-registry — no extra condition needed for that.
+  # ────────────────────────────────────────────────────────────────────────────
+  mcp-registry:
+    name: Publish to MCP Registry
+    runs-on: ubuntu-latest
+    needs: [release, docker]
+    if: needs.release.outputs.released == 'true'
+    permissions:
+      id-token: write   # Required for GitHub OIDC auth to MCP Registry
+      contents: read
+    env:
+      VERSION:    ${{ needs.release.outputs.version }}
+      IMAGE_NAME: ${{ inputs.image-name }}
+
+    steps:
+      - name: Checkout (post-release HEAD)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: main
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
+            | tar xz mcp-publisher
+
+      - name: Stamp version into server.json
+        # server.json is committed with "0.0.0" placeholders; replace with the
+        # just-released version so the OCI identifier points at the image tag
+        # the docker job just pushed.
+        run: |
+          jq --arg v  "$VERSION" \
+             --arg img "$IMAGE_NAME" \
+            '.version = $v | .packages[0].identifier = ($img + ":v" + $v)' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+          cat server.json
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to MCP Registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
+
+      - name: Verify registry listing
+        run: |
+          sleep 5
+          curl -sf "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.wyre-technology/${{ inputs.server-name }}" \
+            | jq '.servers[]?.server | {name, version}'
