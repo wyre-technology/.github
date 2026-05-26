@@ -32,9 +32,26 @@ major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
 # Classify a PR title as ELIGIBLE (patch/minor) or MAJOR.
 # Grouped Dependabot PRs are configured to contain only minor/patch updates.
 classify() {
-  local title="$1"
-  if grep -qiE '\bgroup\b' <<<"$title"; then echo ELIGIBLE; return; fi
-  # "... from A.B.C to D.E.F"
+  local title="$1" num="$2" repo="$3"
+  # GAP-1 hardening (2026-05-26): a "group" PR is ELIGIBLE only if EVERY dep in it is
+  # minor/patch. The TITLE does not list the deps, so parse the PR BODY's "from A to B"
+  # pairs + major_of each. FAIL-CLOSED: any cross-major OR no-parseable-pair -> MAJOR
+  # (report, never merge) -- matches the rest of classify()'s conservative posture.
+  # Existing update-type-scoped groups (e.g. npm-minor-patch) list only minor/patch bumps
+  # -> still ELIGIBLE (no behavior change); only a PATTERN-group bundling a major -> MAJOR.
+  if grep -qiE '\bgroup\b' <<<"$title"; then
+    local body found=0 line
+    body="$(gh pr view "$num" -R "$ORG/$repo" --json body --jq '.body' 2>/dev/null)" || { echo MAJOR; return; }
+    while IFS= read -r line; do
+      if [[ "$line" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]]; then
+        found=1
+        if [[ "$(major_of "${BASH_REMATCH[1]}")" != "$(major_of "${BASH_REMATCH[2]}")" ]]; then echo MAJOR; return; fi
+      fi
+    done <<<"$body"
+    [[ "$found" == "1" ]] && echo ELIGIBLE || echo MAJOR
+    return
+  fi
+  # single-update PR: "... from A.B.C to D.E.F"
   if [[ "$title" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]]; then
     local from="${BASH_REMATCH[1]}" to="${BASH_REMATCH[2]}"
     if [[ "$(major_of "$from")" == "$(major_of "$to")" ]]; then echo ELIGIBLE; else echo MAJOR; fi
@@ -52,7 +69,7 @@ for repo in "${REPOS[@]}"; do
     [[ -z "$num" ]] && continue
     label="$repo #$num — $title"
 
-    if [[ "$(classify "$title")" == "MAJOR" ]]; then
+    if [[ "$(classify "$title" "$num" "$repo")" == "MAJOR" ]]; then
       echo "$label" >>"$work/majors"; continue
     fi
     if [[ "$mergeable" == "CONFLICTING" ]]; then
