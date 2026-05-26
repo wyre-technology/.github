@@ -27,9 +27,6 @@ jobs:
   janitor:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out scripts
-        uses: actions/checkout@v4
-
       - name: Mint org-wide installation token
         id: app-token
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
@@ -38,9 +35,31 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
+      - name: Check out scripts
+        uses: actions/checkout@v4
+        with:
+          # Persist the app token so the backlog commit can push back to .github.
+          token: ${{ steps.app-token.outputs.token }}
+
       - name: Run janitor
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
           DRY_RUN: ${{ inputs.dry_run }}
+          BACKLOG_FILE: dependabot-backlog.md
         run: bash .github/scripts/dependabot-janitor.sh
+
+      - name: Commit backlog if changed
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "wyre-projects-bot[bot]"
+          git config user.email "wyre-projects-bot[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- dependabot-backlog.md; then
+            git add dependabot-backlog.md
+            git commit -m "chore: update Dependabot backlog [skip ci]"
+            git push
+          else
+            echo "Backlog unchanged — nothing to commit."
+          fi
