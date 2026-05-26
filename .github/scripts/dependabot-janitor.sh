@@ -86,7 +86,7 @@ for repo in "${REPOS[@]}"; do
     if merge_err="$(gh pr merge "$num" -R "$ORG/$repo" --squash --delete-branch 2>&1)"; then
       echo "$label$flag" >>"$work/merged"
     else
-      if grep -qiE 'review|code ?owner|protected|required' <<<"$merge_err"; then
+      if grep -qiE 'review|code ?owner|protected|required|base branch policy|not mergeable|auto.?merge' <<<"$merge_err"; then
         echo "$label" >>"$work/blocked"
       else
         echo "$repo #$num: $(tr '\n' ' ' <<<"$merge_err" | head -c 160)" >>"$work/errors"
