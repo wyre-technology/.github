@@ -40,15 +40,24 @@ classify() {
   # Existing update-type-scoped groups (e.g. npm-minor-patch) list only minor/patch bumps
   # -> still ELIGIBLE (no behavior change); only a PATTERN-group bundling a major -> MAJOR.
   if grep -qiE '\bgroup\b' <<<"$title"; then
-    local body found=0 line
+    # Parse EVERY dependabot per-dep marker line ("Updates `pkg` ..." / "Bumps `pkg` ...").
+    # Each marker line MUST yield a parseable same-major from->to, else MAJOR. FAIL-CLOSED
+    # on partial-parse: a marker line that does not parse a same-major pair -> MAJOR (do not
+    # let "we parsed some and they were fine" pass as "all are fine" -- warden). Zero markers
+    # or body-fetch-fail -> MAJOR.
+    local body line deps=0 ok=0
     body="$(gh pr view "$num" -R "$ORG/$repo" --json body --jq '.body' 2>/dev/null)" || { echo MAJOR; return; }
     while IFS= read -r line; do
-      if [[ "$line" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]]; then
-        found=1
-        if [[ "$(major_of "${BASH_REMATCH[1]}")" != "$(major_of "${BASH_REMATCH[2]}")" ]]; then echo MAJOR; return; fi
+      [[ "$line" =~ (Updates|Bumps)[[:space:]]+\`  ]] || continue   # dependabot per-dep marker lines only
+      deps=$((deps+1))
+      if [[ "$line" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]] \
+         && [[ "$(major_of "${BASH_REMATCH[1]}")" == "$(major_of "${BASH_REMATCH[2]}")" ]]; then
+        ok=$((ok+1))
+      else
+        echo MAJOR; return   # marker line with no parseable same-major pair -> fail-closed
       fi
     done <<<"$body"
-    [[ "$found" == "1" ]] && echo ELIGIBLE || echo MAJOR
+    [[ "$deps" -gt 0 && "$ok" -eq "$deps" ]] && echo ELIGIBLE || echo MAJOR
     return
   fi
   # single-update PR: "... from A.B.C to D.E.F"
