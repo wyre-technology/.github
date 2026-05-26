@@ -1,0 +1,46 @@
+name: Dependabot Janitor
+
+# Daily sweep that auto-merges green Dependabot patch/minor PRs across all
+# wyre-technology mcp-* and node-* repos. Majors, red CI, conflicts, and PRs
+# blocked by required code-owner review are reported, never merged.
+#
+# Auth: a GitHub App installation token (APP_ID / APP_PRIVATE_KEY org secrets).
+# The app must have Contents: Read & write and Pull requests: Read & write.
+
+on:
+  schedule:
+    - cron: "0 13 * * *" # daily 09:00 America/New_York (13:00 UTC)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Classify and report only; do not merge"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: dependabot-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out scripts
+        uses: actions/checkout@v4
+
+      - name: Mint org-wide installation token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Run janitor
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: bash .github/scripts/dependabot-janitor.sh
