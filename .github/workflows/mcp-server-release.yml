@@ -43,6 +43,8 @@ name: MCP Server Release (reusable)
 #   mcp-registry ← always() ensures its `if:` is evaluated even when docker
 #                  was skipped; then guards on released == 'true' AND
 #                  docker result == 'success'.
+#   security     ← same gating as mcp-registry: scans the exact image tag the
+#                  docker job just pushed and uploads SARIF to code scanning.
 
 on:
   workflow_call:
@@ -289,3 +291,38 @@ jobs:
           curl -sf \
             "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.wyre-technology/${{ inputs.server-name }}" \
             | jq '.servers[]?.server | {name, version}'
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # 4. Trivy image scan → GitHub code scanning
+  #    Scans the exact tag the docker job just pushed (not :latest, which can
+  #    race with concurrent pushes) and uploads SARIF so findings appear under
+  #    Security → Code scanning. Same always()/result gating as mcp-registry:
+  #    no release or failed docker build → nothing to scan.
+  #
+  #    NOTE (private repos): SARIF upload requires GitHub Code Security to be
+  #    enabled on the repo; public repos get it for free.
+  # ────────────────────────────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [release, docker]
+    if: >
+      always() &&
+      needs.release.outputs.released == 'true' &&
+      needs.docker.result == 'success'
+    permissions:
+      contents: read
+      security-events: write   # SARIF upload to code scanning
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8  # v0.36.0
+        with:
+          image-ref: '${{ inputs.image-name }}:v${{ needs.release.outputs.version }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@0daab03d71ff584ef619d027a3fd9146679c5d84  # v3.35.3
+        with:
+          sarif_file: 'trivy-results.sarif'
