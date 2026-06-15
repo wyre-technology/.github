@@ -32,7 +32,7 @@ jobs:
       - name: Mint installation token
         id: app-token
         if: steps.check.outputs.has_creds == 'true'
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -40,7 +40,7 @@ jobs:
 
       - name: Add issue/PR to project
         if: steps.check.outputs.has_creds == 'true'
-        uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e # v1.0.2
+        uses: actions/add-to-project@5afcf98fcd03f1c2f92c3c83f58ae24323cc57fd # v2.0.0
         with:
           project-url: https://github.com/orgs/wyre-technology/projects/1
           github-token: ${{ steps.app-token.outputs.token }}
