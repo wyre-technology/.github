@@ -210,6 +210,22 @@ jobs:
             type=semver,pattern={{major}},value=v${{ needs.release.outputs.version }}
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # GitHub Packages auth for `npm ci` of private @wyre-technology/node-* SDK
+      # deps inside the Docker build. *-mcp Dockerfiles use one of three styles;
+      # we supply all three so this reusable is a drop-in for every repo without
+      # per-repo Dockerfile changes:
+      #   1. `ARG NODE_AUTH_TOKEN` + committed .npmrc referencing it  → build-arg
+      #   2. `ARG GITHUB_TOKEN` + Dockerfile writes its own .npmrc      → build-arg
+      #   3. `RUN --mount=type=secret,id=npmrc`                          → secret-file
+      # Unconsumed build-args / secrets are a harmless Docker warning, never an error.
+      - name: Prepare npmrc build secret
+        run: |
+          {
+            echo "@wyre-technology:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}"
+            echo "always-auth=true"
+          } > /tmp/.npmrc
+
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
@@ -223,10 +239,14 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          secret-files: |
+            npmrc=/tmp/.npmrc
           build-args: |
             VERSION=${{ needs.release.outputs.version }}
             COMMIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCP Registry publish
