@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 #
 # Dependabot janitor: across all wyre-technology mcp-* and node-* repos, auto-merge
-# Dependabot patch/minor PRs whose CI is green. Majors, red CI, conflicts, and PRs
-# blocked by required code-owner review are reported but never merged.
+# Dependabot patch/minor PRs — AND major bumps of dev/CI tooling (eslint, vitest,
+# typescript, @types/*, GitHub Actions, etc.) — whose CI is green. Major bumps of
+# RUNTIME dependencies, red CI, conflicts, and code-owner-blocked PRs are reported
+# but never merged. A green test suite is treated as sufficient proof for dev/CI
+# tooling (it doesn't ship at runtime); runtime majors always need a human.
 #
 # Requires: gh CLI authenticated via GH_TOKEN (a GitHub App installation token with
 # contents:write + pull_requests:write across the org).
@@ -43,6 +46,24 @@ classify() {
   echo MAJOR  # unparseable -> treat conservatively
 }
 
+# A MAJOR bump is auto-mergeable (on green CI) only if the bumped package is
+# dev/CI tooling — it never ships at runtime, so a green build+lint+test is
+# sufficient proof. Everything else (runtime deps) is held for human review,
+# even on green CI, because a passing suite can miss behavioural breaking changes.
+# Conservative by construction: anything not on this allowlist is treated as runtime.
+is_dev_major() {
+  local pkg
+  pkg="$(sed -nE 's/.*[Bb]ump ([^ ]+) from .*/\1/p' <<<"$1")"
+  [[ -z "$pkg" ]] && return 1
+  case "$pkg" in
+    eslint|vitest|typescript|semantic-release|prettier|tsup|msw|jsdom|rimraf|tslib|ts-node|nodemon|husky|lint-staged|c8|nyc|typedoc|vite|tsx) return 0 ;;
+    @vitest/*|@types/*|@typescript-eslint/*|@semantic-release/*|@eslint/*|@testcontainers/*|eslint-*) return 0 ;;
+    # GitHub Actions / CI workflow deps (owner/action form)
+    actions/*|docker/*|github/*|azure/*|aws-actions/*|dependabot/*|hashicorp/*|gitleaks/*|aquasecurity/*|sigstore/*|softprops/*|peter-evans/*|cycjimmy/*|anthropics/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 for repo in "${REPOS[@]}"; do
   prs="$(gh pr list -R "$ORG/$repo" --author 'app/dependabot' --state open \
         --json number,title,mergeable 2>/dev/null)" || { echo "$repo: pr list failed" >>"$work/errors"; continue; }
@@ -52,8 +73,13 @@ for repo in "${REPOS[@]}"; do
     [[ -z "$num" ]] && continue
     label="$repo #$num — $title"
 
+    devmajor=0
     if [[ "$(classify "$title")" == "MAJOR" ]]; then
-      echo "$label" >>"$work/majors"; continue
+      if is_dev_major "$title"; then
+        devmajor=1   # dev/CI tooling major — eligible for auto-merge on green CI
+      else
+        echo "$label" >>"$work/majors"; continue   # runtime major — human review
+      fi
     fi
     if [[ "$mergeable" == "CONFLICTING" ]]; then
       echo "$label" >>"$work/conflicts"; continue
@@ -74,7 +100,7 @@ for repo in "${REPOS[@]}"; do
       nocheck=0
     fi
 
-    flag=""; [[ "${nocheck:-0}" == "1" ]] && flag=" (no CI)"
+    flag=""; [[ "${nocheck:-0}" == "1" ]] && flag=" (no CI)"; [[ "${devmajor:-0}" == "1" ]] && flag="$flag (dev-major)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "$label$flag" >>"$work/merged"; continue
@@ -82,7 +108,7 @@ for repo in "${REPOS[@]}"; do
 
     # Approve (satisfies non-code-owner review requirements) then squash-merge.
     gh pr review "$num" -R "$ORG/$repo" --approve \
-      -b "Auto-approved by Dependabot janitor: patch/minor update, CI green." >/dev/null 2>&1
+      -b "Auto-approved by Dependabot janitor: CI green (patch/minor, or dev/CI-tooling major)." >/dev/null 2>&1
     if merge_err="$(gh pr merge "$num" -R "$ORG/$repo" --squash --delete-branch 2>&1)"; then
       echo "$label$flag" >>"$work/merged"
     else
@@ -126,7 +152,9 @@ backlog="${BACKLOG_FILE:-dependabot-backlog.md}"
   echo
   echo "_Last updated: $(date -u +%Y-%m-%dT%H:%MZ)_"
   echo
-  echo "## Major-version updates (left for review)"
+  echo "## Runtime major-version updates (left for review)"
+  echo "_Dev/CI-tooling majors (eslint, vitest, typescript, @types/*, Actions, …) auto-merge on green CI; only runtime-dependency majors land here._"
+  echo
   if [[ -s "$work/majors" ]]; then sed 's/^/- /' "$work/majors"; else echo "_none_"; fi
   echo
   echo "## Blocked — code-owner approval required"
