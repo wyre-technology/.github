@@ -9,7 +9,8 @@ name: Dependabot Janitor
 
 on:
   schedule:
-    - cron: "0 13 * * *" # daily 09:00 America/New_York (13:00 UTC)
+    - cron: "0 13 * * *" # 09:00 America/New_York (13:00 UTC)
+    - cron: "0 21 * * *" # 17:00 America/New_York (21:00 UTC)
   workflow_dispatch:
     inputs:
       dry_run:
