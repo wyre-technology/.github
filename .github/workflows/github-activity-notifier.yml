@@ -1,0 +1,63 @@
+name: github-activity-notifier
+
+# Posts newly opened issues/PRs across the wyre-technology org to the
+# #github-activity Slack channel. Excludes "[bot]" accounts (Dependabot,
+# Renovate, github-actions, ...) and the authors in EXCLUDE_AUTHORS
+# (asachs01 is always excluded).
+#
+# Detection uses a rolling LOOKBACK window over the GitHub Search API. The
+# committed state file .github/github-activity-state.json provides
+# de-duplication + at-least-once delivery, so this workflow only commits when
+# there is genuinely new activity. The built-in GITHUB_TOKEN can read public
+# search results org-wide; no PAT is required (public repos only).
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log intended messages without posting to Slack'
+        type: boolean
+        default: false
+
+concurrency:
+  group: github-activity-notifier
+  cancel-in-progress: false
+
+permissions:
+  contents: write # commit the state file back to the repo
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Notify Slack of new external activity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SLACK_GITHUB_ACTIVITY_WEBHOOK_URL: ${{ secrets.SLACK_GITHUB_ACTIVITY_WEBHOOK_URL }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          LOOKBACK_MINUTES: '60'
+        run: node scripts/github-activity-notifier.mjs
+
+      - name: Commit updated state
+        if: always()
+        env:
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: |
+          if [ "$DRY_RUN" = "1" ]; then
+            echo "Dry run — not committing state."
+            exit 0
+          fi
+          if git diff --quiet -- .github/github-activity-state.json; then
+            echo "No state change."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/github-activity-state.json
+          git commit -m "chore(notifier): update github-activity state [skip ci]"
+          git push
