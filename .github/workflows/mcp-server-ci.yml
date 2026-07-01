@@ -54,6 +54,10 @@ on:
         description: 'Run scripts/lint-destructive-warnings.mjs against src (used by *-mcp repos with destructive-action tools).'
         type: boolean
         default: false
+      credential-mutation-guard:
+        description: 'Fail if src/ assigns to process.env (the cross-tenant credential-leak anti-pattern in gateway mode). Use request-scoped credentials instead. Line-level opt-out: append "cred-lint-allow".'
+        type: boolean
+        default: true
       environment:
         description: 'GitHub Environment to run in (for env-scoped secrets, e.g. "Default").'
         type: string
@@ -124,6 +128,29 @@ jobs:
           else
             echo "::notice::scripts/lint-destructive-warnings.mjs not found — skipping."
           fi
+
+      - name: Guard against per-request process.env credential mutation
+        if: inputs.credential-mutation-guard
+        shell: bash
+        run: |
+          if [ ! -d src ]; then
+            echo "::notice::No src/ directory — skipping credential-mutation guard."
+            exit 0
+          fi
+          # Assigning request credentials to process.env (dot or bracket form) is a
+          # cross-tenant leak in gateway/HTTP mode: process.env is process-global, so
+          # concurrent tenants race on it. Use request-scoped credentials instead
+          # (AsyncLocalStorage / per-request config threading). See saas-alerts-mcp.
+          # Excludes tests; append "cred-lint-allow" on a line for a vetted exception.
+          matches=$(grep -rnE 'process\.env(\.[A-Za-z_][A-Za-z0-9_]*|\[[^]]+\]) *=[^=]' src \
+            --include='*.ts' --include='*.mts' 2>/dev/null \
+            | grep -vE '\.test\.|\.spec\.|/__tests__/|/tests?/|cred-lint-allow' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Assignment to process.env found in src/. In gateway mode this leaks credentials across concurrent tenants. Use request-scoped credentials (AsyncLocalStorage / per-request config), not process.env mutation. For a genuinely safe non-credential assignment, append '// cred-lint-allow' to the line."
+            echo "$matches"
+            exit 1
+          fi
+          echo "::notice::No per-request process.env mutation in src/. ✓"
 
       - name: Unit tests
         run: npm run ${{ inputs.unit-test-script }}
