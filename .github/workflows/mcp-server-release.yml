@@ -96,6 +96,7 @@ jobs:
     permissions:
       contents: write   # push tags + create GitHub releases
       issues: write     # @semantic-release/github creates release-linked issues
+      packages: read    # npm ci of @wyre-technology/* SDKs from GitHub Packages
     outputs:
       version:  ${{ steps.detect.outputs.version }}
       released: ${{ steps.detect.outputs.released }}
@@ -119,25 +120,20 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           scope: '@wyre-technology'
 
-      # Mint a GitHub App installation token scoped to the whole org so `npm ci`
-      # can read the private @wyre-technology/node-* SDK packages. The default
-      # GITHUB_TOKEN only grants read to *this* repo's packages, so cross-repo
-      # SDK deps 403 ("Permission installation not allowed to read organization
-      # package"). owner-scoped (no `repositories:`) → the token can read every
-      # repo's packages the app installation can see. Requires the app to have
-      # the `packages: read` permission and `secrets: inherit` from the caller.
-      - name: Mint GitHub App token (cross-repo packages:read)
-        id: app_token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
+      # GITHUB_TOKEN (with this job's `packages: read`) is the canonical npm
+      # auth for the public @wyre-technology/* SDKs — the same pattern
+      # mcp-assert.yml uses, proven to download cross-repo packages fresh.
+      # Do NOT swap in a custom GitHub App installation token here: the npm
+      # registry rejects those for cross-repo package reads with 403
+      # "Permission installation not allowed to Read organization package"
+      # (that 403 previously seen here was this job missing `packages: read`,
+      # not a GITHUB_TOKEN limitation). If an SDK package ever goes private,
+      # grant the consuming repo access in the package's "Manage Actions
+      # access" settings — GITHUB_TOKEN then still works.
       - name: Install dependencies
         run: npm ci
         env:
-          NODE_AUTH_TOKEN: ${{ steps.app_token.outputs.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         run: npm run build
@@ -233,22 +229,17 @@ jobs:
       #   2. `ARG GITHUB_TOKEN` + Dockerfile writes its own .npmrc      → build-arg
       #   3. `RUN --mount=type=secret,id=npmrc`                          → secret-file
       # Unconsumed build-args / secrets are a harmless Docker warning, never an error.
-      # Same cross-repo packages:read need as the release job — the Docker build
-      # runs `npm ci` of the private @wyre-technology/node-* SDK inside the image,
-      # which GITHUB_TOKEN cannot read across repos. Mint an org-scoped app token.
-      - name: Mint GitHub App token (cross-repo packages:read)
-        id: app_token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
+      # Same npm auth as the release job: GITHUB_TOKEN (this job already has
+      # `packages: write` for the ghcr push, which covers registry reads of the
+      # public @wyre-technology/* SDKs). Custom App installation tokens are NOT
+      # accepted by the npm registry for cross-repo package reads (403
+      # "Permission installation not allowed to Read organization package") —
+      # first proven live by ninjaone-mcp v2.0.0's failed image build.
       - name: Prepare npmrc build secret
         run: |
           {
             echo "@wyre-technology:registry=https://npm.pkg.github.com"
-            echo "//npm.pkg.github.com/:_authToken=${{ steps.app_token.outputs.token }}"
+            echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}"
             echo "always-auth=true"
           } > /tmp/.npmrc
 
@@ -271,8 +262,8 @@ jobs:
             VERSION=${{ needs.release.outputs.version }}
             COMMIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
-            NODE_AUTH_TOKEN=${{ steps.app_token.outputs.token }}
-            GITHUB_TOKEN=${{ steps.app_token.outputs.token }}
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCP Registry publish
