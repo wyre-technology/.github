@@ -38,6 +38,32 @@ name: MCP Server Release (reusable)
 #   `git tag --points-at HEAD`. A semver tag on HEAD means semantic-release
 #   just pushed a new tag for this commit. No tag → no release.
 #
+# THIRD BUG FIXED: first-release failure on the @semantic-release/github
+# `success` step (missing `pull-requests` permission).
+#
+#   The release job previously granted only `contents: write`, `issues: write`,
+#   and `packages: read`. After cutting a release, @semantic-release/github's
+#   `success` step runs an `associatedPullRequests` GraphQL READ so it can post
+#   a "released in vX.Y.Z" comment on every PR swept into the release. Without
+#   `pull-requests` permission that read returns `FORBIDDEN` and the plugin
+#   throws — failing the whole release. On a FIRST release (which sweeps many
+#   already-merged PRs) this reliably kills the run; observed live on pax8-mcp:
+#     GraphqlResponseError ... type: 'FORBIDDEN' ... associatedPullRequests
+#     → Resource not accessible by integration
+#   pax8 was patched per-repo with `successComment: false`, but the durable
+#   fleet fix is to grant the permission the default behaviour actually needs.
+#
+#   Fix: add `pull-requests: write` to the release job below. This is the
+#   minimal correct scope — it lets the default successComment/failComment
+#   behaviour work instead of forcing every repo to disable it.
+#
+#   CALLER PROPAGATION (REQUIRED): a reusable workflow can only ever REDUCE the
+#   permissions the CALLER granted its `uses:` job — never expand them. So this
+#   job only receives `pull-requests: write` if the per-repo thin caller
+#   (`.github/workflows/release.yml`) also lists `pull-requests: write` in the
+#   `permissions:` block on the job that calls this reusable. Callers must add
+#   it; see the CHANGELOG entry for the fleet-wide follow-up.
+#
 # GATING CONTRACT:
 #   docker       ← runs only when release.outputs.released == 'true'
 #   mcp-registry ← always() ensures its `if:` is evaluated even when docker
@@ -94,9 +120,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: write   # push tags + create GitHub releases
-      issues: write     # @semantic-release/github creates release-linked issues
-      packages: read    # npm ci of @wyre-technology/* SDKs from GitHub Packages
+      contents: write       # push tags + create GitHub releases
+      issues: write         # @semantic-release/github creates release-linked issues
+      pull-requests: write  # @semantic-release/github success step reads + comments on associated PRs
+      packages: read        # npm ci of @wyre-technology/* SDKs from GitHub Packages
     outputs:
       version:  ${{ steps.detect.outputs.version }}
       released: ${{ steps.detect.outputs.released }}
