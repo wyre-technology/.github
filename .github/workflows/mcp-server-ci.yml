@@ -21,7 +21,7 @@ on:
       node-versions:
         description: 'JSON array of Node.js versions to matrix-test (default LTS-only).'
         type: string
-        default: '["20"]'
+        default: '["22", "24"]'
       lint:
         description: 'Run `npm run lint` if a lint script is defined.'
         type: boolean
