@@ -18,7 +18,7 @@ on:
       node-version:
         description: 'Node.js version to use'
         type: string
-        default: '20'
+        default: '24'
 
 # Required so GITHUB_TOKEN can read @wyre-technology/* packages from
 # GitHub Packages during `npm ci`. Without packages:read, npm ci 401s
