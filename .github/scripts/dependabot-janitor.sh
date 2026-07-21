@@ -100,6 +100,22 @@ for repo in "${REPOS[@]}"; do
       nocheck=0
     fi
 
+    # A green suite is what makes a dev/CI-tooling major (or a "trust the
+    # group" grouped bump) safe to auto-merge. With NO CI at all, there is no
+    # proof — not "sufficient proof", none. classify()'s group-shortcut
+    # assumes a grouped title never contains a major (true only when
+    # dependabot.yml's own update-types actually excludes majors from that
+    # group, which isn't guaranteed for PRs opened before such a config
+    # change, or on repos without one). This is exactly how node-datto-rmm#46
+    # ("bump the dev-dependencies group with 3 updates") auto-merged a hidden
+    # typescript major on a no-CI repo and broke main (2026-07-21): the title
+    # matched the group-shortcut, devmajor stayed 0, and it fell through on
+    # nocheck alone. Hold both cases for human review instead of guessing.
+    is_grouped=0; grep -qiE '\bgroup\b' <<<"$title" && is_grouped=1
+    if [[ "${nocheck:-0}" == "1" ]] && { [[ "${devmajor:-0}" == "1" ]] || [[ "$is_grouped" == "1" ]]; }; then
+      echo "$label (no CI to verify — group/major, held for review)" >>"$work/majors"; continue
+    fi
+
     flag=""; [[ "${nocheck:-0}" == "1" ]] && flag=" (no CI)"; [[ "${devmajor:-0}" == "1" ]] && flag="$flag (dev-major)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
