@@ -97,7 +97,26 @@ for repo in "${REPOS[@]}"; do
         echo "$label" >>"$work/red"; continue
       fi
     else
-      nocheck=0
+      # rc=0 also covers the vacuous case where EVERY check reports
+      # "skipping" (e.g. release/deploy jobs gated to push-to-main only, no
+      # dedicated PR-time test job) -- exit code alone can't tell "genuinely
+      # validated" from "nothing ran". If every check's bucket is
+      # "skipping", there is no real proof; treat it the same as
+      # no-checks-at-all rather than as green. A partial mix (some real
+      # checks + some skipped release/deploy jobs) still counts as
+      # genuinely validated -- only ALL-skipping loses trust. Concrete
+      # instance: sentinelone-mcp#31 (2026-07-21), all-skipping/rc=0, would
+      # have auto-merged a TS7 major with zero flag -- worse than
+      # node-datto-rmm#46's already-flagged "(no CI)" case, since that one
+      # at least surfaced in the run summary.
+      buckets_json="$(gh pr checks "$num" -R "$ORG/$repo" --json bucket 2>/dev/null)"
+      total="$(jq 'length' <<<"${buckets_json:-[]}" 2>/dev/null || echo 0)"
+      skipping="$(jq '[.[] | select(.bucket=="skipping")] | length' <<<"${buckets_json:-[]}" 2>/dev/null || echo 0)"
+      if [[ "$total" -gt 0 && "$total" == "$skipping" ]]; then
+        nocheck=1
+      else
+        nocheck=0
+      fi
     fi
 
     # A green suite is what makes a dev/CI-tooling major (or a "trust the
