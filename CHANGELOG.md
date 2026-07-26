@@ -8,6 +8,22 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: pinned `provenance: false` on the
+  `docker/build-push-action` step and added a digest-resolution verification
+  step (`imagetools inspect` + hard-fail on empty `Config.Env`) before handing
+  the digest to any caller. Root cause: `docker/build-push-action`'s default
+  SLSA provenance attestation adds an `attestation-manifest` sibling to the
+  pushed image index, and `steps.push.outputs.digest` can nondeterministically
+  resolve to that attestation manifest instead of the real image. This shipped
+  attestation-manifest digests as the "image" for `blumira-mcp`, `mimecast-mcp`,
+  and `timezest-mcp`'s 2026-07-23 release runs — Azure Container Apps then
+  looped forever on `ImagePullFailure`/`ContainerCreateFailure` trying to
+  unpack a JSON blob as a container, a silent ~2.5-day outage across all 3
+  before an unrelated audit caught it. `provenance: false` removes the failure
+  mode at the source; the verification step is defense-in-depth against any
+  other manifest-shape surprise (index-with-no-matching-platform, a different
+  attestation type, etc.) reaching a caller's deploy job undetected.
+
 - **`mcp-server-release.yml`**: added `pull-requests: write` to the `release`
   job's permissions. `@semantic-release/github`'s `success` step performs an
   `associatedPullRequests` GraphQL read to comment on PRs swept into a release;
