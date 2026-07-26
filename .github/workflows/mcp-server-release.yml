@@ -218,7 +218,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.resolve.outputs.digest }}
 
     steps:
       - name: Checkout
@@ -270,6 +270,19 @@ jobs:
             echo "always-auth=true"
           } > /tmp/.npmrc
 
+      # provenance: false — 2026-07-23 outage root cause. BuildKit's default
+      # SLSA provenance attestation adds an `attestation-manifest` sibling
+      # (platform: unknown/unknown, single in-toto layer) alongside the real
+      # per-platform image in the pushed OCI index. steps.push.outputs.digest
+      # is supposed to resolve to the real image, but for blumira-mcp,
+      # mimecast-mcp, and timezest-mcp's 2026-07-23 release runs it instead
+      # resolved to the attestation-manifest digest — a known nondeterministic
+      # footgun of docker/build-push-action with provenance left on default.
+      # ACA then tried to pull+unpack that digest as a container image, which
+      # is just a JSON attestation blob with no real filesystem layers:
+      # `ctr: failed to unpack image on snapshotter overlaybd: mismatched
+      # image rootfs and manifest layers` — an infinite pull-retry loop,
+      # silently down for ~2.5 days until an unrelated audit caught it.
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
@@ -277,6 +290,7 @@ jobs:
           context: .
           platforms: ${{ inputs.platforms }}
           push: true
+          provenance: false
           tags: |
             ${{ inputs.image-name }}:latest
             ${{ inputs.image-name }}:v${{ needs.release.outputs.version }}
@@ -291,6 +305,36 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
             GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
+      # Belt-and-suspenders (defense-in-depth, independent of provenance:false
+      # above): never trust steps.push.outputs.digest blindly downstream.
+      # Resolve the digest through `docker buildx imagetools inspect` and hard-
+      # fail if it doesn't carry a real image config — i.e. if it's an
+      # attestation manifest, an index with no matching platform entry, or
+      # anything else that isn't an actual pullable container image. This is
+      # what would have caught the 2026-07-23 outage before the bad digest
+      # ever reached the deploy job, regardless of what caused it.
+      - name: Resolve and verify real image digest
+        id: resolve
+        run: |
+          DIGEST="${{ steps.push.outputs.digest }}"
+          REF="${{ inputs.image-name }}@${DIGEST}"
+
+          # A real image manifest (or an index resolving to one) has a non-empty
+          # Config.Env or Config.Cmd. An attestation-manifest's config is a bare
+          # {} (no Env/Cmd/Entrypoint) because it never describes a runnable
+          # container — it's the reliable, cheap discriminator between "this is
+          # a container image" and "this is some other manifest shape."
+          CONFIG=$(docker buildx imagetools inspect "$REF" --format '{{json .Config}}' 2>&1) \
+            || { echo "::error::imagetools inspect failed for $REF: $CONFIG"; exit 1; }
+
+          if ! echo "$CONFIG" | jq -e '(.Env // []) | length > 0' >/dev/null 2>&1; then
+            echo "::error::Resolved digest $DIGEST for ${{ inputs.image-name }} does not carry a real image config (empty Env) — this looks like an attestation-manifest or other non-image manifest, not a runnable container. Refusing to hand this digest to the deploy job. See the 2026-07-23 outage root-cause comment above this step."
+            exit 1
+          fi
+
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "::notice::Verified $REF is a real image (non-empty Config.Env)."
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCP Registry publish
