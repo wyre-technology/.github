@@ -42,7 +42,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run build --if-present
-      - uses: wyre-technology/mcp-eval-baseline@bbcd7891e9d0904855130959366f58d6f68e01c8 # v1
+      - uses: wyre-technology/mcp-eval-baseline@c31238deec6898f3f135038891cd6c3e29fb2761 # v1, pins mcp-eval-baseline#2 (mcp-assert version pin, closes fleet-wide 403)
         with:
           entry: ${{ inputs.entry }}
           canary-tool: ${{ inputs.canary-tool }}
