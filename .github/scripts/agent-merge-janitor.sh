@@ -199,7 +199,7 @@ scan_one_repo() {
   local repo="$1" prs="$2"
   [[ "$(jq 'length' <<<"$prs")" == "0" ]] && return
 
-  while IFS=$'\t' read -r num title author is_draft mergeable merge_state head_sha; do
+  while IFS=$'\t' read -r num title author is_draft mergeable _merge_state head_sha; do
     [[ -z "$num" ]] && continue
     label_line="$repo #$num — $title (@$author)"
 
