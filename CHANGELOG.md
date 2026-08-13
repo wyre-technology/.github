@@ -8,6 +8,39 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: restored packing and uploading of the Claude
+  Desktop `.mcpb` bundle as a GitHub release asset, via a new `mcpb` job. The
+  hand-rolled per-repo workflows this reusable replaced each carried a "Pack and
+  upload MCPB bundle" step; it was not carried over, so every repo that migrated
+  silently stopped attaching its bundle while its README still told users to
+  "download the `.mcpb` from the latest release". Fleet audit on 2026-08-13:
+  **25 of the 26 repos with a `pack:mcpb` script publish releases with zero
+  assets**; only `itglue-mcp` still ships one, through a repo-local stopgap job
+  whose own comment asks for exactly this upstreaming. Reported as
+  `autotask-mcp#244` (last bundle `v2.28.8`, first empty release `v2.30.0`,
+  regressed by that repo's centralization PR #183).
+
+  The job is **auto-detected** from the presence of a `pack:mcpb` script rather
+  than gated on a new input, so affected repos recover by bumping their pin
+  alone — no PR against 25 callers. Repos without the script no-op in seconds.
+  It `needs: [release]` only, never `docker`, so a pack failure cannot cascade
+  into skipping `mcp-registry`/`security`/`deploy`: by that point the release is
+  already tagged and published, and a missing bundle is a much smaller problem
+  than a missing deploy.
+
+  **Version stamping is load-bearing.** Pack scripts copy `package.json`'s
+  version into the bundle's `manifest.json`, but semantic-release does not
+  commit its bump back (no `@semantic-release/git`), so `package.json` at the
+  release tag still holds the *previous* version. Verified live against
+  `autotask-mcp` at `v2.32.2`: packing the tag as-is produces a bundle stamped
+  `2.18.0` — the version `main` has been frozen at for 14 releases — while
+  stamping first produces the correct `2.32.2`. Without the
+  `npm version --no-git-tag-version` step this job would ship a
+  plausible-looking but wrongly-versioned bundle, which is worse than shipping
+  none. No caller permission changes are required: the job requests
+  `contents: write` + `packages: read`, both already granted by existing thin
+  callers.
+
 - **`mcp-server-release.yml`**: pinned `provenance: false` on the
   `docker/build-push-action` step and added a digest-resolution verification
   step (`imagetools inspect` + hard-fail on empty `Config.Env`) before handing
