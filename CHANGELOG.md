@@ -8,6 +8,26 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: the digest-verification step added in #40 used
+  an invalid `--format` template and failed every run it was reached in.
+  `docker buildx imagetools inspect --format` exposes exactly three fields —
+  `.Name`, `.Manifest`, `.Image` — and no top-level `.Config`, so
+  `'{{json .Config}}'` aborts with `template: :1:7: executing "" at <.Config>:
+  can't evaluate field Config in type image`. The image config lives under
+  `.Image`. Caught live on `autotask-mcp` v2.32.4, the first release to reach
+  this step after #40 landed: the image built and pushed to GHCR correctly, but
+  the verification failure failed the `docker` job and cascaded `mcp-registry`,
+  `security` and the caller's `deploy` to skipped — so a good image never
+  reached production. Every repo would have hit this on its next pin bump.
+  - Also fixes a latent multi-arch bug in the same check: `.Image` is the config
+    object for a single-platform build but a **platform-keyed map** for a
+    multi-arch one, so even the corrected `.Image.Config` would fail for any
+    caller passing a comma-separated `platforms:`. The check now normalises both
+    shapes to a list and requires *every* platform to carry a non-empty
+    `Config.Env`, so a multi-arch build cannot pass on one good platform alone.
+    Verified against all three manifest shapes (single-platform, multi-platform,
+    and a bare attestation-manifest config, which is still correctly rejected).
+
 - **`mcp-server-release.yml`**: restored packing and uploading of the Claude
   Desktop `.mcpb` bundle as a GitHub release asset, via a new `mcpb` job. The
   hand-rolled per-repo workflows this reusable replaced each carried a "Pack and

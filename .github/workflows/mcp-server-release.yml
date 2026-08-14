@@ -355,10 +355,30 @@ jobs:
           # {} (no Env/Cmd/Entrypoint) because it never describes a runnable
           # container — it's the reliable, cheap discriminator between "this is
           # a container image" and "this is some other manifest shape."
-          CONFIG=$(docker buildx imagetools inspect "$REF" --format '{{json .Config}}' 2>&1) \
-            || { echo "::error::imagetools inspect failed for $REF: $CONFIG"; exit 1; }
+          #
+          # `--format` exposes EXACTLY three fields: .Name, .Manifest, .Image
+          # (docker/docs, cli/buildx/docker_buildx_imagetools_inspect.yaml).
+          # There is no top-level .Config; asking for one dies with
+          #   template: :1:7: executing "" at <.Config>: can't evaluate field
+          #   Config in type image
+          # which is what autotask-mcp v2.32.4 hit — the first release to run
+          # this step after #40 landed. It failed the docker job and cascaded
+          # mcp-registry/security/deploy to skipped even though the image had
+          # pushed fine. The image config lives under .Image.
+          IMAGE=$(docker buildx imagetools inspect "$REF" --format '{{json .Image}}' 2>&1) \
+            || { echo "::error::imagetools inspect failed for $REF: $IMAGE"; exit 1; }
 
-          if ! echo "$CONFIG" | jq -e '(.Env // []) | length > 0' >/dev/null 2>&1; then
+          # .Image is the config object for a single-platform build, but a
+          # PLATFORM-KEYED MAP ({"linux/amd64": {...}, "linux/arm64": {...}})
+          # for a multi-arch one — i.e. any caller passing a comma-separated
+          # `platforms:`. Normalise both shapes to a list and require EVERY
+          # platform to carry a real config, so a multi-arch build cannot pass
+          # on the strength of one good platform. A null/odd .Image makes jq
+          # fail, which lands on the safe side (reject).
+          if ! printf '%s' "$IMAGE" | jq -e '
+                (if has("Config") then [.] else [.[]] end)
+                | length > 0 and all(.[]; (.Config.Env // []) | length > 0)
+              ' >/dev/null 2>&1; then
             echo "::error::Resolved digest $DIGEST for ${{ inputs.image-name }} does not carry a real image config (empty Env) — this looks like an attestation-manifest or other non-image manifest, not a runnable container. Refusing to hand this digest to the deploy job. See the 2026-07-23 outage root-cause comment above this step."
             exit 1
           fi
