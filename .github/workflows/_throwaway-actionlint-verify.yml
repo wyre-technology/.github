@@ -1,0 +1,26 @@
+name: THROWAWAY — actionlint live-verify, DO NOT MERGE
+
+# Exists only to prove PR #48's actionlint check actually fails red on a
+# real PR-triggered run (task_1786817866098_46819260 — "a check nobody has
+# seen fail is not yet a check"). Contains a deliberate, unambiguous
+# actionlint error below. This PR gets closed without merging once the
+# check reports red; this file never reaches main.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deliberately malformed expression
+        # Truncated/invalid GitHub Actions expression syntax — actionlint's
+        # expression parser should reject this outright.
+        if: ${{ github.event_name ==
+        run: echo "should never run"
+
+      - name: Unpinned action ref
+        # Deliberate second, independent finding — a floating tag instead
+        # of a pinned SHA, the exact C-4 shape this org treats as a real
+        # violation elsewhere.
+        uses: actions/checkout@main
