@@ -1,0 +1,64 @@
+name: Actionlint
+
+# The only real PR-time gate on this repo's OWN workflow YAML. Every
+# meaningful workflow here (mcp-assert.yml, mcp-server-ci.yml,
+# mcp-server-deploy.yml, mcp-server-release.yml, pr-spam-triage.yml) is
+# `workflow_call` only — they validate the CONSUMING repo that invokes them,
+# never a PR against this repo itself. auto-add-to-project.yml is the only
+# other workflow that fires on `pull_request` here, and it's a project-board
+# adder, not a CI check. Before this file, a PR that broke the YAML syntax,
+# an `if:` condition, a `needs:` reference, or a secret name in any workflow
+# here merged with zero validation — the same "vacuous CI" shape #47 fixed
+# for consuming repos, one layer up, on this repo's own source.
+#
+# Scope is deliberately narrow: lint the changed workflow YAML for syntax/
+# structural correctness (bad expressions, unknown contexts, shellcheck
+# issues in `run:` blocks, unpinned action refs, etc. — actionlint's own
+# rule set). It does NOT smoke-test what the reusable workflows actually DO
+# when invoked — that's real, separate work, tracked to not let this PR's
+# scope swallow it.
+on:
+  # No `paths:` filter, deliberately — this check exists to become a REQUIRED
+  # status check (condition 1 of 2 for unblocking the fleet tagging rollout).
+  # A path-filtered `pull_request` trigger means this job simply never runs
+  # on a PR that doesn't touch .github/workflows/**, so a required check
+  # bound to it never reports and GitHub blocks the merge indefinitely
+  # waiting for a status that will never arrive — the same shape forge hit
+  # the same hour deciding not to require the (also not-yet-live-everywhere)
+  # verify check across 59 consumer repos. Running unconditionally on every
+  # PR is a few seconds of actionlint work when nothing relevant changed
+  # (filter_mode: added below means it reports nothing in that case) —
+  # cheap, and it makes "the check always reports" the default rather than
+  # something the next person has to remember to preserve.
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: actionlint
+        # filter_mode: added (not the action's own default of `file`) —
+        # verified locally that a full-file run already surfaces one
+        # pre-existing, unrelated shellcheck style nit in
+        # mcp-server-release.yml (SC2129, noted and accepted as non-blocking
+        # in #47's own PR description). `file` mode would make that PR's
+        # entire file red on every future edit to it, for lines the edit
+        # never touches — `added` scopes findings to what the diff itself
+        # introduces, so this gates new problems without blocking on
+        # existing debt elsewhere in a touched file.
+        uses: reviewdog/action-actionlint@dbe5299849118fd6f099ba563d263d770955a64a  # v1.73.2
+        with:
+          fail_level: error
+          filter_mode: added
+          reporter: github-pr-check
