@@ -89,7 +89,24 @@ name: MCP Server Release (reusable)
 #   yields the correct 2.32.2. Without the stamp this job would ship a
 #   plausible-looking but wrongly-versioned bundle — worse than shipping none.
 #
+# FIFTH BUG FIXED: vacuous CI on pull requests (5 repos with zero PR-time
+# validation of any kind — verified 2026-08-15).
+#
+#   Every per-repo caller invokes this reusable on BOTH push-to-main and
+#   pull_request, but the only job that existed here (`release`) is gated to
+#   push-to-main only. On a PR the job is skipped entirely — the caller's
+#   check goes green because nothing ran, not because anything passed.
+#
+#   Fix: the `verify` job below carries no gate at all, so it runs on every
+#   event the caller fires this workflow for. `release` now also
+#   `needs: [verify]`, so a failing build/lint/test blocks publish too — not
+#   previously enforced even on the push path. See the comment on `verify`
+#   itself for the full detail and why this is a new parallel job rather than
+#   a restructure of `release`'s own (unchanged) steps.
+#
 # GATING CONTRACT:
+#   verify       ← unconditional. Runs on push AND pull_request alike.
+#   release      ← push-to-main only, AND needs: [verify].
 #   docker       ← runs only when release.outputs.released == 'true'
 #   mcpb         ← same gate, but deliberately in its OWN job needing only
 #                  `release`. A pack failure must not cascade into skipping
@@ -143,11 +160,86 @@ on:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
+  # 0. verify — build/lint/test, UNCONDITIONAL (runs on every event this
+  #    reusable is called for: push AND pull_request).
+  #
+  #    ROOT-CAUSE BUG FIXED (vacuous CI on PRs — 5 repos with zero PR-time
+  #    validation of any kind: alternative-payments-mcp, avanan-legacy-mcp,
+  #    clio-mcp, salesforce-mcp, sentinelone-mcp; verified 2026-08-15):
+  #
+  #    Every per-repo caller (`.github/workflows/release.yml`) already invokes
+  #    this reusable workflow on BOTH push-to-main and pull_request — but the
+  #    only job that existed here (`release`, below) is gated
+  #    `if: event == push && ref == main`. On a PR the condition is false, the
+  #    job is skipped, and NOTHING runs — not npm ci, not the build, nothing.
+  #    The caller's PR check goes green because the job it invited never
+  #    executed, not because anything passed. Repos with their own standalone
+  #    `ci.yml` (Tier 1) or wired to the separate `mcp-assert.yml` reusable
+  #    (Tier 2) were unaffected; repos with neither had zero PR-time coverage.
+  #
+  #    Fix: this job carries no `if:` gate at all, so it runs on every event
+  #    the caller fires it for — push AND pull_request alike. `release`
+  #    (below) keeps its existing push-to-main-only gate AND now also
+  #    `needs: [verify]`, so publish can't proceed past a failing build/lint/
+  #    test even on the push path (previously unenforced there too — `release`
+  #    ran its own build but nothing failed the job on a bad lint or test).
+  #
+  #    Deliberately a SEPARATE job rather than restructuring `release`'s own
+  #    steps: `release`'s build/install steps are unchanged, untouched, and
+  #    still work exactly as before for the push-to-main path this file has
+  #    three separate historical bug-fix comments protecting — a parallel
+  #    unconditional job is the minimal-diff way to add PR-time coverage
+  #    without touching that already-hardened path.
+  #
+  #    `--if-present` on lint/test: this reusable is called by every *-mcp
+  #    repo in the fleet, and not all of them declare a `lint` script (2 of
+  #    the 5 originally-exposed repos don't). `build` has no such guard — a
+  #    repo without a working build script was never going to survive the
+  #    existing `release` job's own unconditional `npm run build` either, so
+  #    requiring it here changes nothing about what already had to hold true.
+  # ────────────────────────────────────────────────────────────────────────────
+  verify:
+    name: Build, Lint, Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read   # npm ci of @wyre-technology/* SDKs from GitHub Packages
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          # Canonical GitHub Packages auth — matches the release job below and
+          # mcp-server-ci.yml.
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@wyre-technology'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test --if-present
+
+  # ────────────────────────────────────────────────────────────────────────────
   # 1. semantic-release
   # ────────────────────────────────────────────────────────────────────────────
   release:
     name: Release
     runs-on: ubuntu-latest
+    needs: [verify]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write       # push tags + create GitHub releases
