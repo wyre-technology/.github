@@ -18,9 +18,19 @@ name: Actionlint
 # when invoked — that's real, separate work, tracked to not let this PR's
 # scope swallow it.
 on:
+  # No `paths:` filter, deliberately — this check exists to become a REQUIRED
+  # status check (condition 1 of 2 for unblocking the fleet tagging rollout).
+  # A path-filtered `pull_request` trigger means this job simply never runs
+  # on a PR that doesn't touch .github/workflows/**, so a required check
+  # bound to it never reports and GitHub blocks the merge indefinitely
+  # waiting for a status that will never arrive — the same shape forge hit
+  # the same hour deciding not to require the (also not-yet-live-everywhere)
+  # verify check across 59 consumer repos. Running unconditionally on every
+  # PR is a few seconds of actionlint work when nothing relevant changed
+  # (filter_mode: added below means it reports nothing in that case) —
+  # cheap, and it makes "the check always reports" the default rather than
+  # something the next person has to remember to preserve.
   pull_request:
-    paths:
-      - '.github/workflows/**'
 
 permissions:
   contents: read
