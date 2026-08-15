@@ -375,16 +375,35 @@ jobs:
           # platform to carry a real config, so a multi-arch build cannot pass
           # on the strength of one good platform. A null/odd .Image makes jq
           # fail, which lands on the safe side (reject).
+          #
+          # CASING: this marshals an OCI image config, whose top-level key is
+          # LOWERCASE `config` (capitalised `Env` nested inside) — verified
+          # against the real config blob for
+          # ghcr.io/wyre-technology/autotask-mcp@sha256:b92a86a8…, whose keys
+          # are exactly: architecture, config, created, history, os, rootfs.
+          # An earlier revision of this check tested has("Config") and so fell
+          # into the platform-map branch for every single-platform build,
+          # rejecting perfectly good images and blocking autotask-mcp v2.32.5's
+          # deploy. `docker image inspect` (a DIFFERENT command) does return
+          # capitalised `Config`, which is the trap — accept either.
           if ! printf '%s' "$IMAGE" | jq -e '
-                (if has("Config") then [.] else [.[]] end)
-                | length > 0 and all(.[]; (.Config.Env // []) | length > 0)
+                def cfg: (.config // .Config // {});
+                (if (has("config") or has("Config")) then [.] else [.[]] end)
+                | length > 0 and all(.[]; (cfg.Env // []) | length > 0)
               ' >/dev/null 2>&1; then
             echo "::error::Resolved digest $DIGEST for ${{ inputs.image-name }} does not carry a real image config (empty Env) — this looks like an attestation-manifest or other non-image manifest, not a runnable container. Refusing to hand this digest to the deploy job. See the 2026-07-23 outage root-cause comment above this step."
+            # Print what we actually saw. Without this, diagnosing a rejection
+            # means pulling the manifest out of the registry by hand — which is
+            # exactly what the v2.32.5 false-positive cost.
+            echo "::group::Observed .Image payload (first 2000 chars)"
+            printf '%s' "$IMAGE" | head -c 2000
+            echo
+            echo "::endgroup::"
             exit 1
           fi
 
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "::notice::Verified $REF is a real image (non-empty Config.Env)."
+          echo "::notice::Verified $REF is a real image (non-empty config.Env)."
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCPB bundle → GitHub release asset
