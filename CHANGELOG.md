@@ -8,6 +8,23 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: the digest-verification check tested the wrong
+  key casing and rejected every legitimate single-platform image. The payload is
+  a marshalled OCI image config, whose top-level key is lowercase `config` (with
+  a capitalised `Env` nested inside) — `docker image inspect`, a *different*
+  command, is what returns capitalised `Config`, and that is the trap. Testing
+  `has("Config")` sent every single-platform build down the platform-map branch,
+  so the check iterated the wrong values and hard-failed. Blocked `autotask-mcp`
+  v2.32.5's deploy; the rejected digest was confirmed by hand against GHCR to be
+  a genuine OCI image manifest (image config + 12 layers), not an attestation.
+  The check now accepts either casing and is verified against the real config
+  blob rather than hand-written fixtures — the previous revision was tested only
+  against invented shapes that encoded the same wrong assumption.
+  - Also adds failure-time diagnostics: on rejection the step now prints the
+    `.Image` payload it actually saw. Without it, diagnosing a false positive
+    means pulling the manifest out of the registry by hand, which is what this
+    one cost.
+
 - **`mcp-server-release.yml`**: the digest-verification step added in #40 used
   an invalid `--format` template and failed every run it was reached in.
   `docker buildx imagetools inspect --format` exposes exactly three fields —
