@@ -6,6 +6,38 @@ here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/fleet-triage.md`**: design for a scheduled Claude routine covering the
+  org-wide PR/issue automation that `dependabot-janitor` does not — liveness,
+  issues, non-Dependabot PRs, the code-owner-blocked backlog, release
+  decoupling, and agent-authored fixes. Explicitly *not* a second merge policy:
+  Dependabot merging stays `dependabot-janitor.sh`'s job and the routine
+  consumes its output buckets rather than re-classifying.
+
+  Written after a survey on 2026-08-17 found two silent absence-of-signal
+  failures running concurrently: `dependabot-janitor` has been
+  `disabled_manually` since 2026-07-21 (27 days, 241 open Dependabot PRs) with
+  nothing alerting on the gap, and `dependabot-backlog.md` — which
+  `dependabot-janitor.sh` writes and whose comments name a downstream weekly
+  digest routine as its consumer — **404s on `main`** and has never been
+  committed. Neither is reachable by hardening the merge policy, which is where
+  all prior effort went (#28, #36, #38, #23), so liveness is component 1.
+
+  The survey also found, against `main`:
+  - `required_status_checks` is `NULL` on **20/20** sampled `*-mcp` repos, so
+    CI passing is enforced nowhere at the branch level. The janitor's
+    `gh pr checks` read is the only CI gate in the system, and it has been
+    wrong twice (#36, #38) with no defense in depth behind it.
+  - **#23 is still a live hole.** `classify()` retains the blanket
+    `grep -qiE '\bgroup\b' -> ELIGIBLE` title shortcut; #36 added only a
+    downstream guard for grouped PRs with *no* CI. A grouped PR with *green* CI
+    still auto-merges on a title match — the `node-datto-rmm#46` shape minus
+    the no-CI leg. Needs a rebase onto post-#36/#38 `main`, not a rewrite.
+  - **#22 is obsolete and would regress if merged.** It pins
+    `actions/checkout` to `v4.3.1`; `main` already SHA-pins `v6.0.3` via #24.
+    Close it, don't merge it.
+
 ### Fixed
 
 - **`mcp-server-release.yml`**: the digest-verification check tested the wrong
