@@ -112,6 +112,34 @@ here. The format is based on
 
 ### Added
 
+- **`janitor-liveness`** workflow + script: deadman check for
+  `dependabot-janitor`. Alerts to Slack when the janitor is `disabled_*`, when
+  it is active but has not completed a run inside `STALE_HOURS` (default 36),
+  or when `dependabot-backlog.md` is missing/stale. 6-hourly.
+
+  **Why:** between 2026-07-21 and 2026-08-17 the janitor sat
+  `disabled_manually` and nothing noticed for **27 days**, while the Dependabot
+  backlog grew past 240 open PRs. It produced **zero failed runs** in that
+  window — because it produced zero runs — so every failure-watching signal
+  was silent by construction. Watching for a failed run cannot catch a job that
+  never starts; this watches for absence instead.
+
+  Two design points are load-bearing:
+  - **`disabled` and `stalled` are distinct states.** A disabled janitor is a
+    decision that has outlived its reason; a stalled one is a breakage. They
+    need different messages and different escalation, and collapsing them is
+    what let 27 days read as normal.
+  - **The backlog artifact is checked independently of run health.**
+    `dependabot-backlog.md` has never been committed to `main` (404) despite
+    `dependabot-janitor.sh` naming a downstream digest routine as its consumer.
+    A janitor that runs cleanly and writes nothing is still broken, one hop
+    downstream.
+
+  Verified against live state before merge: correctly reports
+  `disabled_manually`, 27d 3h quiet, 242 queued PRs. Unit tests cover both real
+  regressions as named cases. `shouldAlert()` — the escalation policy — is left
+  unimplemented on purpose; see the PR.
+
 - **`github-activity-notifier`** workflow + script: posts newly opened
   issues/PRs across the `wyre-technology` org to the #github-activity Slack
   channel. Excludes `[bot]` accounts and `asachs01` (extendable via
