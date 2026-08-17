@@ -8,6 +8,28 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: the `mcpb` job did not install the MCPB CLI, so
+  it failed on 24 of the 26 repos with a `pack:mcpb` script. Pack scripts shell
+  out to `npx mcpb pack`; only `autotask-mcp` and `blumira-mcp` carry
+  `@anthropic-ai/mcpb` as a dependency, so everywhere else `npx` tried to fetch
+  a package literally named `mcpb` from the public registry and died with
+  `npm error 404 Not Found - GET https://registry.npmjs.org/mcpb`. The
+  hand-rolled per-repo workflows all ran `npm install -g @anthropic-ai/mcpb` for
+  exactly this reason; the job omitted it because it was validated only against
+  `autotask-mcp`, one of the two repos where the omission is invisible. Caught
+  live on `atera-mcp`. `npx` resolves `node_modules/.bin` before the global
+  prefix, so a repo pinning its own version still wins — this is a fallback,
+  not an override.
+  - **Corrected a false claim in this file's own comments.** They stated that
+    because `mcpb` needs only `release` and never `docker`, a pack failure
+    "cannot cascade into skipping the deploy chain". That holds *within* this
+    workflow, but callers invoke the whole file as a **single job**, so every
+    job here rolls up into one conclusion — any failure marks the caller's
+    `release` job failed and skips a caller `deploy: needs: release`. Confirmed
+    on `atera-mcp`: `docker`, `mcp-registry` and `security` all succeeded,
+    `mcpb` failed, and `deploy` was skipped regardless. A bug in the `mcpb` job
+    is therefore deploy-blocking, and the comments now say so.
+
 - **`mcp-server-release.yml`**: the digest-verification check tested the wrong
   key casing and rejected every legitimate single-platform image. The payload is
   a marshalled OCI image config, whose top-level key is lowercase `config` (with
