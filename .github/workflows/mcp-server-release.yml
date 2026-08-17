@@ -108,11 +108,13 @@ name: MCP Server Release (reusable)
 #   verify       ← unconditional. Runs on push AND pull_request alike.
 #   release      ← push-to-main only, AND needs: [verify].
 #   docker       ← runs only when release.outputs.released == 'true'
-#   mcpb         ← same gate, but deliberately in its OWN job needing only
-#                  `release`. A pack failure must not cascade into skipping
-#                  docker/mcp-registry/security/deploy: the release is already
-#                  tagged and published by then, and a missing bundle is a far
-#                  smaller problem than a missing deploy.
+#   mcpb         ← same gate, in its own job needing only `release`, so a pack
+#                  failure does not stop docker/mcp-registry/security from
+#                  running here. NOTE: that is workflow-internal only. Callers
+#                  invoke this file as ONE job, so any failure here fails the
+#                  caller's `release` job and skips a caller `deploy:
+#                  needs: release`. A pack failure IS deploy-blocking from the
+#                  caller's side — see the note above the mcpb job.
 #   mcp-registry ← always() ensures its `if:` is evaluated even when docker
 #                  was skipped; then guards on released == 'true' AND
 #                  docker result == 'success'.
@@ -499,8 +501,21 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCPB bundle → GitHub release asset
-  #    Needs only `release`, never `docker`, so a pack failure cannot cascade
-  #    into skipping the deploy chain (see GATING CONTRACT above).
+  #    Needs only `release`, never `docker`, so a pack failure does not stop
+  #    docker/mcp-registry/security from RUNNING inside this workflow.
+  #
+  #    IMPORTANT — this does NOT isolate the caller's deploy. A caller invokes
+  #    this whole file as a SINGLE job (`release: uses: …mcp-server-release.yml`),
+  #    so every job here rolls up into that one job's conclusion. Any failure
+  #    inside — including this one — marks the caller's `release` job failed,
+  #    and a caller `deploy: needs: release` is therefore SKIPPED. Observed on
+  #    atera-mcp: docker, mcp-registry and security all succeeded, mcpb failed,
+  #    and deploy was skipped anyway. An earlier revision of this comment
+  #    claimed a pack failure "cannot cascade into skipping the deploy chain";
+  #    that is true within this workflow and false from the caller's side.
+  #
+  #    So a bug in this job IS deploy-blocking. Keep it boring and keep it
+  #    tested against a repo that does NOT carry @anthropic-ai/mcpb.
   # ────────────────────────────────────────────────────────────────────────────
   mcpb:
     name: Pack and upload MCPB bundle
@@ -559,6 +574,24 @@ jobs:
         env:
           VERSION: ${{ needs.release.outputs.version }}
         run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      # Pack scripts shell out to `npx mcpb pack`, which needs the mcpb CLI on
+      # PATH. Only 2 of the 26 repos with a pack:mcpb script (autotask-mcp,
+      # blumira-mcp) carry `@anthropic-ai/mcpb` as a dependency; in the other 24
+      # `npx mcpb` tries to fetch a package literally named "mcpb" from the
+      # public registry and dies with:
+      #   npm error 404 Not Found - GET https://registry.npmjs.org/mcpb
+      # The hand-rolled per-repo workflows all ran this global install for
+      # exactly that reason; this job originally omitted it, having been
+      # validated only against autotask-mcp — one of the two repos where the
+      # omission is invisible. Caught live on atera-mcp.
+      #
+      # `npx` resolves node_modules/.bin BEFORE the global prefix, so a repo
+      # that does pin its own @anthropic-ai/mcpb version still wins; this is a
+      # fallback, not an override.
+      - name: Install MCPB CLI
+        if: steps.detect.outputs.supported == 'true'
+        run: npm install -g @anthropic-ai/mcpb
 
       - name: Pack MCPB bundle
         if: steps.detect.outputs.supported == 'true'
