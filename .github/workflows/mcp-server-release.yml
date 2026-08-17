@@ -200,6 +200,85 @@ jobs:
   #    existing `release` job's own unconditional `npm run build` either, so
   #    requiring it here changes nothing about what already had to hold true.
   # ────────────────────────────────────────────────────────────────────────────
+  # gate: decide whether THIS push should be allowed to cut a release.
+  #
+  # WHY: `dependabot-janitor` auto-merges across the fleet on a schedule. A dry
+  # run on 2026-08-17 would have merged 118 PRs across 71 repos in a single
+  # sweep — and because every caller's `release.yml` fires on `push: [main]`,
+  # that is up to 71 semantic-release → GHCR → Azure Container Apps deploys in
+  # one unbatched, unreviewed wave. These are credential brokers holding live
+  # customer API tokens; "main is briefly wrong" and "71 production containers
+  # rolled at 09:00 with nobody watching" are very different blast radii.
+  #
+  # RULE: hold the release only when EVERY commit since the last release tag
+  # carries the `Auto-Merged-By:` trailer. If a human merged anything in that
+  # range, they are taking responsibility for the release and the accumulated
+  # autonomous commits ship alongside it — which is the normal, desirable case
+  # and needs no ceremony.
+  #
+  # OPENING THE GATE: a held repo accumulates commits until something without
+  # the trailer lands. `release-sweeper.yml` in this repo does that on a daily
+  # schedule by pushing one `chore(release):` commit to each held repo, so a
+  # batch ships once a day with a human-auditable trigger point. A gate with no
+  # opener would accumulate forever, which is why the sweeper is not optional.
+  #
+  # Deliberately NOT implemented as a caller-side change: 58 thin callers would
+  # each need editing. This gates centrally and reaches the fleet by pin bump,
+  # the same mechanism the `mcpb` job restoration used.
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    outputs:
+      autonomous: ${{ steps.check.outputs.autonomous }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Classify commits since last release tag
+        id: check
+        env:
+          TRAILER: 'Auto-Merged-By'
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet || true
+
+          # Most recent semver tag reachable from HEAD. No tag => first release
+          # for this repo; never hold it (there is nothing to batch onto).
+          last_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            echo "No previous release tag — not holding (first release)."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          range="${last_tag}..HEAD"
+          total="$(git rev-list --count "$range")"
+          if [ "$total" -eq 0 ]; then
+            echo "No commits since ${last_tag} — nothing to gate."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Count commits carrying the trailer. --format=%(trailers:key=...) is
+          # empty for commits without it, so grep -c on non-empty lines counts
+          # exactly the autonomous ones.
+          auto="$(git log "$range" --format="%(trailers:key=${TRAILER},valueonly)" \
+                  | grep -c '[^[:space:]]' || true)"
+
+          echo "Commits since ${last_tag}: ${total} (autonomous: ${auto})"
+          git log "$range" --format='  %h %s' | head -25
+
+          if [ "$auto" -eq "$total" ]; then
+            echo "::notice::All ${total} commit(s) since ${last_tag} are autonomous merges — holding release for the daily batch. release-sweeper.yml will ship these."
+            echo "autonomous=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$(( total - auto )) human-authored commit(s) in range — releasing normally (accumulated autonomous commits ship alongside)."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
     name: Build, Lint, Test
     runs-on: ubuntu-latest
@@ -241,8 +320,15 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [verify]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [gate, verify]
+    # `gate` holds the release when every commit since the last tag is an
+    # autonomous merge — see the gate job's comment. Everything downstream
+    # (docker, mcpb, mcp-registry, security, and the caller's deploy) already
+    # keys off `release.outputs.released`, so holding here holds the whole
+    # chain with no further edits and no caller changes.
+    if: >
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.gate.outputs.autonomous != 'true'
     permissions:
       contents: write       # push tags + create GitHub releases
       issues: write         # @semantic-release/github creates release-linked issues

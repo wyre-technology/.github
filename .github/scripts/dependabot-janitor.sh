@@ -144,7 +144,16 @@ for repo in "${REPOS[@]}"; do
     # Approve (satisfies non-code-owner review requirements) then squash-merge.
     gh pr review "$num" -R "$ORG/$repo" --approve \
       -b "Auto-approved by Dependabot janitor: CI green (patch/minor, or dev/CI-tooling major)." >/dev/null 2>&1
-    if merge_err="$(gh pr merge "$num" -R "$ORG/$repo" --squash --delete-branch 2>&1)"; then
+    # The `Auto-Merged-By:` trailer is what mcp-server-release.yml's `gate` job
+    # reads to decide whether a push to main may cut a release. When EVERY commit
+    # since the last tag carries it, the release is held for the daily batch
+    # (release-sweeper.yml) instead of firing an unreviewed
+    # semantic-release → GHCR → Azure deploy per repo. Removing this trailer
+    # silently re-couples auto-merge to production deploys.
+    merge_body="Auto-merged by dependabot-janitor: CI green (patch/minor, or dev/CI-tooling major).
+
+Auto-Merged-By: dependabot-janitor"
+    if merge_err="$(gh pr merge "$num" -R "$ORG/$repo" --squash --delete-branch --body "$merge_body" 2>&1)"; then
       echo "$label$flag" >>"$work/merged"
     else
       if grep -qiE 'review|code ?owner|protected|required|base branch policy|not mergeable|auto.?merge' <<<"$merge_err"; then
