@@ -8,6 +8,50 @@ here. The format is based on
 
 ### Fixed
 
+- **`dependabot-janitor.sh`**: `classify()` no longer treats the word "group" in
+  a PR title as proof that the PR is minor/patch. It now parses the body's
+  per-dependency `Updates \`pkg\` from A to B` markers and requires **every** one
+  to be same-major, failing closed on any cross-major, unparseable marker, zero
+  markers, or failed body fetch. Supersedes #23, rebased onto post-#36/#38 `main`.
+
+  **This was live, not theoretical.** Measured against the current backlog on
+  2026-08-17: of the 118 PRs a dry run would merge, 108 are grouped, and **69 of
+  those 108 (64%) contain at least one cross-major bump**, across 62 repos. The
+  blanket shortcut would have merged every one of them without inspecting a
+  single dependency.
+
+  `is_dev_major`'s allowlist is **not** a defence here — `classify()` returns
+  `ELIGIBLE` for grouped PRs *before* the dev-major check runs, so the grouped
+  path was strictly more permissive than the single-package path it sits beside.
+  Two of the 69 carry a genuinely runtime, non-allowlisted major:
+  `ironscales-mcp#38` and `salesbuildr-mcp#55`, both bumping the Docker base
+  image `node` from `22-alpine` to `26-alpine` — four majors, straight to
+  production on merge.
+
+  This is the same hole that broke `main` via `node-datto-rmm#46` on 2026-07-21.
+  #36 responded with a downstream guard, but only for grouped PRs with *no* CI;
+  a grouped PR with *green* CI still rode the title shortcut untouched.
+
+  Two changes beyond #23 as authored:
+  - **Body fetch moved from `gh pr view` (GraphQL) to `gh api` (REST).**
+    Fail-closed is right for a corrupt body, but during a GraphQL outage *every*
+    grouped PR would fail closed and the whole backlog would stall behind a
+    dependency the classifier does not need. Observed live on 2026-08-17: GraphQL
+    returned 503 for hours while REST stayed healthy, making 40 of 108 PRs
+    unclassifiable under `gh pr view` and 0 of 108 under `gh api`.
+  - **Version-capture regex uses `[^[:space:]]`, not `[^\`[:space:]]`.** Inside a
+    bracket expression the latter is the literal set `` { ` [ : s p a c e ] } ``,
+    which does not exclude whitespace, so the capture runs greedy across `" to "`
+    and yields nothing. A scan built on that construct — run under macOS
+    `/bin/bash` 3.2, where `BASH_REMATCH` additionally never populated —
+    reported all 108 grouped PRs clean. That false negative is what initially
+    mis-classified this hole as latent. `dependabot-janitor.test.sh` now refuses
+    to run unless a known-cross-major probe parses first.
+
+  Adds `.github/scripts/dependabot-janitor.test.sh` — 14 assertions, fixtures
+  taken from real Dependabot bodies (`abnormal-mcp#50`, `salesbuildr-mcp#55`)
+  rather than invented shapes.
+
 - **`mcp-server-release.yml`**: the digest-verification check tested the wrong
   key casing and rejected every legitimate single-platform image. The payload is
   a marshalled OCI image config, whose top-level key is lowercase `config` (with
