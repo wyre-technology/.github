@@ -21,11 +21,16 @@ DRY_RUN="${DRY_RUN:-false}"
 work="$(mktemp -d)"
 for cat in merged majors red pending conflicts blocked errors nocheck; do : > "$work/$cat"; done
 
-# Repos in scope: names ending in -mcp, starting with mcp, or starting with node-.
+# Repos in scope: names ending in -mcp, starting with mcp, starting with node-,
+# or exactly cortextos/conduit (added explicitly rather than widening the
+# pattern, since neither repo shares the mcp-server shape this janitor was
+# built for; task_1785692635899_03153380 — their own Dependabot PRs get zero
+# auto-merge coverage today, agent-merge-janitor deliberately excludes any
+# package.json/lockfile touch, so this is their only auto-merge lane).
 mapfile -t REPOS < <(
   gh api --paginate "/orgs/$ORG/repos?per_page=100" \
     --jq '.[] | select(.archived==false) | .name' \
-  | grep -E '(-mcp$|^mcp|^node-)' | sort -u
+  | grep -E '(-mcp$|^mcp|^node-|^cortextos$|^conduit$)' | sort -u
 )
 echo "Scanning ${#REPOS[@]} repositories in scope..."
 
