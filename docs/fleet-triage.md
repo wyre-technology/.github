@@ -181,12 +181,62 @@ body and failing closed on any cross-major or unparseable pair.
 It conflicts because #36/#38 have since rewritten the surrounding code. It
 needs a rebase, not a rewrite.
 
+**Measured exposure (2026-08-17): latent, not firing.** Of the 118 PRs the dry
+run would merge, **108 (92%) are grouped** — eligible solely via the title
+shortcut, bundling 6–14 updates each. Parsing every dependency out of all 108
+PR bodies found **0 cross-major and 0 unparseable** bumps. The groups are
+genuinely update-type-scoped today, so the shortcut is currently returning the
+right answer for the wrong reason.
+
+That makes #23 a defense-in-depth fix, **not** a re-enable blocker. It should
+still land: a future pattern-group, or a change to a group's `update-types`,
+would be blanket-approved with no per-dep check, and the script would not
+notice.
+
 ### #22 is obsolete and merging it would regress
 
 #22 changes `actions/checkout@v4` → SHA-pinned **`v4.3.1`**. `main` already
 SHA-pins **`v6.0.3`** (landed via #24, the Node 24 bump). The PR's stated goal
 — pin the action that handles the org-wide app token — is already met, at a
 newer version. Merging it would downgrade. Close with a pointer to #24.
+
+## Dry-run baseline (2026-08-17)
+
+`DRY_RUN=true` run of `dependabot-janitor.sh` against `main`, executed locally
+so no production state changed and the disabled workflow stayed disabled:
+
+| Bucket | Count |
+|---|---|
+| Would merge | **118**, across **71** repos |
+| Needs review — major | 25 |
+| Red CI | 21 |
+| Conflicts | 1 |
+| Blocked — code-owner | 0 — **artifact, see below** |
+| Pending CI / Errors | 0 / 0 |
+
+Repos scanned: 100.
+
+### The `blocked` count of 0 proves nothing
+
+The script short-circuits on `DRY_RUN` **before** the approve-and-merge attempt:
+
+```bash
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "$label$flag" >>"$work/merged"; continue
+fi
+# gh pr review --approve ... then gh pr merge   <- never reached in dry run
+```
+
+`blocked` is populated only by a real merge failure, so a dry run can never
+report into it. This run neither confirms nor refutes component 4. Do not read
+the zero as evidence that code-owner review is a non-issue.
+
+### Release coupling makes the first live run the risky one
+
+118 merges across 71 repos, with `release.yml` still firing on `push: [main]`,
+means up to 71 repos cutting semantic-release → GHCR → Azure Container Apps
+deploys in one unbatched, unreviewed wave. **Component 5 is therefore a
+precondition of the first live run, not a follow-up to it.**
 
 ## Open questions
 
@@ -230,12 +280,20 @@ assumption." Fixtures come from real payloads.
 
 ## Rollout
 
-1. Answer open question 1. Do not proceed until the CI-split precondition is
-   resolved.
-2. Set `required_status_checks` fleet-wide.
-3. Merge #50; rebase and merge #23; close #22.
-4. Re-enable `dependabot-janitor` with `dry_run=true` via `workflow_dispatch`;
-   review the classification against the 241-PR backlog before a live run.
-5. Ship component 1 (liveness) — it is the defect that motivated this document
-   and does not depend on anything above.
-6. Components 2–6 in order, each independently revertible.
+Ordered by what the dry-run data says actually gates the next step.
+
+1. **Set `required_status_checks` fleet-wide.** Widest gap, stands alone,
+   depends on nothing else here.
+2. **Ship component 5 (release decoupling).** Precondition of the first live
+   run: 118 merges across 71 repos would otherwise deploy in one wave.
+3. **Ship component 1 (liveness).** The defect that motivated this document.
+   Independent of everything above; can land in parallel.
+4. **Merge #50. Close #22** (obsolete, would downgrade `actions/checkout`).
+   **Rebase and merge #23** — worth landing, but measured as latent, so it does
+   not gate step 5.
+5. **Answer open question 1** — the CI-split precondition (`task_1786765529531`).
+   Nothing re-enables the janitor until this is resolved; it was turned off
+   deliberately.
+6. **Re-enable with `dry_run=true`** via `workflow_dispatch` and diff the
+   classification against the baseline above before the first live run.
+7. Components 2, 3, 4, 6 in order, each independently revertible.
