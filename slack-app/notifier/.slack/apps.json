@@ -1,0 +1,10 @@
+{
+  "apps": {
+    "T0BRHBB2TGW": {
+      "app_id": "A0BRK5LM57F",
+      "team_domain": "wyre-ai-workspace",
+      "team_id": "T0BRHBB2TGW"
+    }
+  },
+  "default": "wyre-ai-workspace"
+}
