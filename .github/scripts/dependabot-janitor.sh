@@ -11,23 +11,39 @@
 # contents:write + pull_requests:write across the org).
 #
 # Env:
-#   ORG          GitHub org (default: wyre-technology)
-#   DRY_RUN      if "true", classify and report but do not approve/merge
+#   ORG            GitHub org (default: wyre-technology)
+#   DRY_RUN        if "true", classify and report but do not approve/merge
+#   EXCLUDE_REPOS  space-separated repo names to skip regardless of the
+#                  in-scope regex match below (default: empty). 2026-08-21:
+#                  used to hold out repos still pinned to the pre-fix
+#                  mcp-server-release.yml (vacuous CI — the same bug class
+#                  that got this janitor disabled 07-21) until each one's
+#                  pin is individually bumped and its CI confirmed real —
+#                  see task_1786765529531 for the incident history. Not a
+#                  one-time hack: any future repo found with a similarly
+#                  untrustworthy CI signal should go on this list too,
+#                  rather than being silently included because it matches
+#                  the regex.
 set -uo pipefail
 
 ORG="${ORG:-wyre-technology}"
 DRY_RUN="${DRY_RUN:-false}"
+EXCLUDE_REPOS="${EXCLUDE_REPOS:-}"
 
 work="$(mktemp -d)"
 for cat in merged majors red pending conflicts blocked errors nocheck; do : > "$work/$cat"; done
 
-# Repos in scope: names ending in -mcp, starting with mcp, or starting with node-.
+# Repos in scope: names ending in -mcp, starting with mcp, or starting with node-,
+# minus anything in EXCLUDE_REPOS.
 mapfile -t REPOS < <(
   gh api --paginate "/orgs/$ORG/repos?per_page=100" \
     --jq '.[] | select(.archived==false) | .name' \
-  | grep -E '(-mcp$|^mcp|^node-)' | sort -u
+  | grep -E '(-mcp$|^mcp|^node-)' \
+  | { if [[ -n "$EXCLUDE_REPOS" ]]; then grep -vxF -f <(tr ' ' '\n' <<<"$EXCLUDE_REPOS"); else cat; fi; } \
+  | sort -u
 )
-echo "Scanning ${#REPOS[@]} repositories in scope..."
+echo "Scanning ${#REPOS[@]} repositories in scope."
+[[ -n "$EXCLUDE_REPOS" ]] && echo "Excluded (EXCLUDE_REPOS): $EXCLUDE_REPOS"
 
 # Return the leading integer (major version) of a semver-ish string.
 major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
@@ -163,6 +179,7 @@ section() { local t="$1" f="$2"; echo "### $t ($(count "$f"))"; [[ -s "$work/$f"
 {
   echo "## 🤖 Dependabot Janitor — $(date -u +%Y-%m-%d\ %H:%MZ)"
   echo "- Repos scanned: ${#REPOS[@]}"
+  [[ -n "$EXCLUDE_REPOS" ]] && echo "- Excluded (still on pre-fix CI pin or otherwise held out): $EXCLUDE_REPOS"
   [[ "$DRY_RUN" == "true" ]] && echo "- **DRY RUN** (no merges performed)"
   echo
   section "✅ Merged"                   merged
