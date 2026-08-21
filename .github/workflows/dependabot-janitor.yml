@@ -48,6 +48,20 @@ jobs:
           ORG: ${{ github.repository_owner }}
           DRY_RUN: ${{ inputs.dry_run }}
           BACKLOG_FILE: dependabot-backlog.md
+          # 2026-08-21: held out until each repo's mcp-server-release.yml pin
+          # is bumped past the pre-fix SHA and its CI is confirmed to
+          # actually build (see task_1786765529531 for why this janitor was
+          # disabled 07-21, and .github#57 for the exclusion mechanism
+          # itself). Remove a repo from this list only after confirming its
+          # pin is current AND a real PR has shown genuine red/green CI, not
+          # just that the pin moved. Pin-migration work tracked with forge.
+          EXCLUDE_REPOS: >-
+            afkbot-mcp auvik-mcp avanan-mcp axcient-mcp blackpoint-mcp
+            cipp-mcp connectwise-cpq-mcp crewhu-mcp domotz-mcp freshdesk-mcp
+            hudu-mcp immybot-mcp inforcer-mcp ironscales-mcp itglue-mcp
+            knowbe4-mcp mailprotector-mcp mimecast-mcp proofpoint-mcp
+            qbo-mcp saas-alerts-mcp scalepad-mcp sherweb-mcp spamtitan-mcp
+            timezest-mcp
         run: bash .github/scripts/dependabot-janitor.sh
 
       - name: Commit backlog if changed
