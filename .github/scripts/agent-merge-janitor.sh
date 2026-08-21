@@ -86,6 +86,21 @@ set -uo pipefail
 # hits. The unresolvable-repo guard below exists precisely so that keeps
 # failing loudly instead of going blind again — if you're re-pointing this at
 # a new org or repo, trust that guard's exit-1, not a clean "0 eligible."
+
+# Case/whitespace-insensitive truthy check for env-var flags. Warden's review
+# of the ENABLE_MERGE addition (2026-08-21): an exact `== "true"` string
+# match on DRY_RUN is fine while DRY_RUN only gated labels/comments, but now
+# that the same flag gates real merges, a stray "True"/"TRUE"/trailing-space
+# value silently falling through to the false branch is a real risk, not a
+# cosmetic one — it would leave ENABLE_MERGE's forced-off override
+# un-triggered. Applied to both flags for consistency, not just the one that
+# was flagged.
+is_true() {
+  local v
+  v="$(tr '[:upper:]' '[:lower:]' <<<"${1:-}" | tr -d '[:space:]')"
+  [[ "$v" == "true" ]]
+}
+
 ORG="${ORG:-WYRE-AI}"
 REPOS="${REPOS:-cortextos conduit}"
 DRY_RUN="${DRY_RUN:-true}"
@@ -96,7 +111,7 @@ LABEL="auto-merge-ready"
 # DRY_RUN is the master safety switch: it must fully disable merging
 # regardless of how ENABLE_MERGE is set, so a config that sets both isn't
 # ambiguous about which one wins.
-if [[ "$DRY_RUN" == "true" ]]; then
+if is_true "$DRY_RUN"; then
   ENABLE_MERGE="false"
 fi
 
@@ -249,7 +264,19 @@ check_repo_resolves() {
 # "repo#number" or nothing if the branch is safe to delete.
 stacked_pr() {
   local repo="$1" branch="$2"
-  gh pr list -R "$ORG/$repo" --state open --base "$branch" --json number --jq '.[0].number // empty' 2>/dev/null
+  local out rc
+  out="$(gh pr list -R "$ORG/$repo" --state open --base "$branch" --json number --jq '.[0].number // empty' 2>&1)"; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    # Fail closed, matching ci_status/check_test_tamper's own convention in
+    # this file: an API error must not read the same as "genuinely zero
+    # stacked PRs," or the branch gets deleted anyway on a lookup failure —
+    # the exact #25->#62 bug, just moved one function over. Any non-empty
+    # return here is treated by the caller as "something's stacked, keep
+    # the branch," so this fails safe without changing do_merge()'s logic.
+    echo "UNKNOWN (gh pr list failed: $out)"
+    return
+  fi
+  echo "$out"
 }
 
 # Merge a fully-verified PR. Re-verifies nothing itself — the caller has
@@ -341,7 +368,7 @@ scan_one_repo() {
     go_login="${go%% *}"; go_sha="${go##* }"
     if [[ "$go_sha" != "$head_sha" ]]; then
       echo "$label_line -- bot review ($go_login) is pinned to $go_sha, current head is $head_sha (stale — new commit pushed since review)" >>"$work/stale_go"
-      if [[ "$DRY_RUN" != "true" ]]; then
+      if ! is_true "$DRY_RUN"; then
         gh pr edit "$num" -R "$ORG/$repo" --remove-label "$LABEL" >/dev/null 2>&1 || true
         gh pr comment "$num" -R "$ORG/$repo" -b "Auto-merge janitor: removing \`$LABEL\` — the bot review is pinned to $go_sha but the current head is $head_sha. A new push invalidates the prior GO signal; re-review needed at the current commit." >/dev/null 2>&1 || true
       fi
@@ -351,7 +378,7 @@ scan_one_repo() {
     # Full pass. Everything above was re-verified fresh, at $head_sha, in
     # this same run -- nothing here is trusted from an earlier pass.
     pass_desc="reviewed by $go_login at $go_sha, CI green, mergeable, clean of all exclusions"
-    if [[ "$ENABLE_MERGE" == "true" ]]; then
+    if is_true "$ENABLE_MERGE"; then
       merge_result="$(do_merge "$num" "$repo" "$head_sha" "$head_branch")"; merge_rc=$?
       if [[ $merge_rc -eq 0 ]]; then
         echo "$label_line -- $pass_desc -- $merge_result" >>"$work/merged"
@@ -407,12 +434,12 @@ section() { local t="$1" f="$2"; echo "### $t ($(count "$f"))"; [[ -s "$work/$f"
 {
   echo "## 🤖 Agent Merge Janitor — $(date -u +%Y-%m-%d\ %H:%MZ)"
   echo "- Repos scanned: $REPOS"
-  if [[ "$ENABLE_MERGE" == "true" ]]; then
+  if is_true "$ENABLE_MERGE"; then
     echo "- **ENABLE_MERGE=true — this run merges eligible PRs automatically.** Reviewer/author separation is not yet guaranteed (see task_1785685546659 design); this should only be true with boss's explicit confirmation that Aaron answered the credential-scoping question."
   else
     echo "- Human click still required to actually merge (see task_1785685546659 design — reviewer/author separation not yet guaranteed)."
   fi
-  [[ "$DRY_RUN" == "true" ]] && echo "- **DRY RUN** (no labels/comments/merges touched)"
+  is_true "$DRY_RUN" && echo "- **DRY RUN** (no labels/comments/merges touched)"
   echo
   section "✅ Merged"                            merged
   section "💥 Merge attempted, failed"           merge_failed
