@@ -56,7 +56,6 @@ jobs:
           # pin is current AND a real PR has shown genuine red/green CI, not
           # just that the pin moved. Pin-migration work tracked with forge.
           EXCLUDE_REPOS: >-
-            hudu-mcp immybot-mcp inforcer-mcp ironscales-mcp
             knowbe4-mcp mailprotector-mcp mimecast-mcp proofpoint-mcp
             saas-alerts-mcp scalepad-mcp sherweb-mcp spamtitan-mcp
             timezest-mcp
