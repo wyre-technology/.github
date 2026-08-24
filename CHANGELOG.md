@@ -8,6 +8,23 @@ here. The format is based on
 
 ### Fixed
 
+- **`scripts/set-required-checks.sh`**: the branch-protection PUT payload
+  hardcoded `restrictions: null` and omitted `lock_branch`/`allow_fork_syncing`
+  entirely, instead of reading and preserving their current values the way the
+  script already does for `required_pull_request_reviews`. Found reviewing
+  #55, which cites this script as already run live against 32 `*-mcp` repos.
+  Verified live against all 32 target repos (not the smaller spot-check from
+  the initial review): none currently have `restrictions`, `lock_branch`, or
+  `allow_fork_syncing` configured, so no repo was actually clobbered by the
+  gap — but the script mutates fleet-wide branch protection and was going to
+  run again, so it's fixed rather than left as a known footgun. Now
+  round-trips all three the same read-merge-write way as the review settings,
+  including converting `restrictions`' GET-shape (objects with `login`/`slug`)
+  to the PUT-shape it actually accepts (arrays of `login`/`slug` strings), and
+  extends the pre-write drift check that already guarded review settings to
+  cover these three fields too — the script refuses to write if any of them
+  would change, the same discipline it already applied to reviews.
+
 - **`mcp-server-release.yml`**: added a `gate` job that holds the release when
   **every** commit since the last tag carries an `Auto-Merged-By:` trailer, plus
   `release-sweeper.yml` + `release-sweeper.sh` to ship the held batch daily.

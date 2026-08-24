@@ -15,7 +15,15 @@
 #    protection object. Sending only required_status_checks would silently drop
 #    required_pull_request_reviews (1 approval + code-owner) on every repo it
 #    touched. This reads current protection and re-sends it with the checks
-#    added.
+#    added. `restrictions`, `lock_branch`, and `allow_fork_syncing` are
+#    round-tripped the same way (not just required_pull_request_reviews) —
+#    an earlier version of this script hardcoded restrictions:null and
+#    silently omitted the other two, which would have clobbered them on any
+#    repo that had them configured. Verified against all 32 target repos on
+#    2026-08-24: none currently have any of the three set, so no live repo
+#    was actually clobbered by the earlier version — but the gap was real
+#    and this script mutates fleet-wide branch protection, so it's fixed
+#    before running again rather than left as a known footgun.
 #
 # 2. INTERSECTION-DERIVED CONTEXTS. A required check whose name never reports
 #    blocks every PR in that repo forever. Path-filtered workflows (e.g.
@@ -69,21 +77,42 @@ while IFS=$'\t' read -r repo always _sometimes; do
           required_approving_review_count: ($cur.required_pull_request_reviews.required_approving_review_count // 1)
         } end
       ),
-      restrictions: null,
+      restrictions: (
+        if $cur.restrictions == null then null
+        else {
+          users: [($cur.restrictions.users // [])[].login],
+          teams: [($cur.restrictions.teams // [])[].slug],
+          apps: [($cur.restrictions.apps // [])[].slug]
+        } end
+      ),
       allow_force_pushes: ($cur.allow_force_pushes.enabled // false),
       allow_deletions: ($cur.allow_deletions.enabled // false),
       required_conversation_resolution: ($cur.required_conversation_resolution.enabled // false),
       required_linear_history: ($cur.required_linear_history.enabled // false),
-      block_creations: ($cur.block_creations.enabled // false)
+      block_creations: ($cur.block_creations.enabled // false),
+      lock_branch: ($cur.lock_branch.enabled // false),
+      allow_fork_syncing: ($cur.allow_fork_syncing.enabled // false)
     }')"
 
   had="$(jq -r '.required_status_checks.contexts // [] | join(", ")' <<<"$cur")"
   want="$(jq -r '.required_status_checks.contexts | join(", ")' <<<"$payload")"
-  # Verify the merge preserved reviews before writing anything.
+  # Verify the merge preserved reviews AND the other read-merge-write fields
+  # (restrictions, lock_branch, allow_fork_syncing) before writing anything.
+  # Same discipline as the review check below — refuse rather than silently
+  # clobber a field this script isn't actually trying to change.
   rev_before="$(jq -c '.required_pull_request_reviews | if .==null then null else {d:.dismiss_stale_reviews,c:.require_code_owner_reviews,n:.required_approving_review_count} end' <<<"$cur")"
   rev_after="$(jq -c '.required_pull_request_reviews | if .==null then null else {d:.dismiss_stale_reviews,c:.require_code_owner_reviews,n:.required_approving_review_count} end' <<<"$payload")"
   if [[ "$rev_before" != "$rev_after" ]]; then
     echo "FAIL $repo — review settings would change ($rev_before -> $rev_after); refusing"
+    failed=$((failed+1)); continue
+  fi
+
+  restr_before="$(jq -c '.restrictions | if .==null then null else {u:([(.users//[])[].login]|sort),t:([(.teams//[])[].slug]|sort),a:([(.apps//[])[].slug]|sort)} end' <<<"$cur")"
+  restr_after="$(jq -c '.restrictions | if .==null then null else {u:(.users|sort),t:(.teams|sort),a:(.apps|sort)} end' <<<"$payload")"
+  other_before="$(jq -c '{lb:(.lock_branch.enabled // false), afs:(.allow_fork_syncing.enabled // false)}' <<<"$cur")"
+  other_after="$(jq -c '{lb:.lock_branch, afs:.allow_fork_syncing}' <<<"$payload")"
+  if [[ "$restr_before" != "$restr_after" || "$other_before" != "$other_after" ]]; then
+    echo "FAIL $repo — restrictions/lock_branch/allow_fork_syncing would change ($restr_before/$other_before -> $restr_after/$other_after); refusing"
     failed=$((failed+1)); continue
   fi
 
