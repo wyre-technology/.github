@@ -160,6 +160,28 @@ on:
         description: 'Docker image digest (sha256:…). Empty when no release was cut.'
         value: ${{ jobs.docker.outputs.digest }}
 
+# CONCURRENCY (2026-08-25, murph/forge): no group meant near-simultaneous
+# pushes to a caller's main (e.g. two dependabot auto-merges seconds apart)
+# could run this workflow twice in parallel, both detect the same releasable
+# HEAD via the git-tag check above, and race the MCP Registry publish step —
+# confirmed live via the identical mechanism in meraki-mcp's legacy inline
+# workflow (WYRE-AI/meraki-mcp#12): 3 merges within 13s, 3 green Release runs,
+# 3 failed "cannot publish duplicate version" 400s. github.ref alone already
+# fully serializes this (same-repo, near-simultaneous pushes to main) — this
+# is a REUSABLE workflow, but GitHub scopes a concurrency group per-repository
+# automatically even for reusable workflows' own group declarations, so two
+# different callers computing the identical literal group string never queue
+# against each other (verified against GitHub's docs + community discussion
+# #88761 before writing this, not assumed). `github.repository` is included
+# anyway purely for a self-documenting group name in the Actions UI — it is
+# not required for correctness and fixes no additional bug.
+#
+# cancel-in-progress: false is deliberate — a queued run should wait for the
+# in-flight release/publish to finish, not cancel it mid-publish.
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # 0. verify — build/lint/test, UNCONDITIONAL (runs on every event this
