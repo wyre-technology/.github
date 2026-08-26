@@ -16,7 +16,9 @@
         "chat:write",
         "chat:write.public",
         "chat:write.customize",
-        "canvases:write"
+        "canvases:write",
+        "channels:history",
+        "channels:join"
       ]
     }
   },

@@ -9,24 +9,35 @@ platform exists (SharePoint pending the M365 tenant), this file migrates there.
 **Rule:** any PR that adds, retires, or re-points an automation updates this
 file in the same PR.
 
-_Last updated: 2026-08-20 · Maintainer: Aaron Sachs (aaron@wyretechnology.com)_
+_Last updated: 2026-08-26 · Maintainer: Aaron Sachs (aaron@wyretechnology.com)_
 
 ---
 
 ## 1. Scheduled automations
 
-### Daily revenue report
-- **What:** MRR, ARR run-rate, conduit/gateway split, trial roster with
-  conversion dates + card-on-file, day-over-day deltas — from Stripe.
-- **Where:** `#sales-notifications` (WYRE AI Slack), weekdays ~10:45 UTC.
-- **How:** GitHub Actions `Subscription Metrics` workflow in
-  `wyre-technology/conduit` (weekdays 10:43 UTC):
-  `scripts/subscription-metrics.mjs` (read-only Stripe) → JSON snapshot on the
-  `metrics-data` branch (latest + dated history) →
-  `scripts/post-revenue-report.mjs` posts via the **WYRE Revenue Reporter**
-  app. Customer lines link to Stripe dashboard profiles.
-- **Credentials:** `STRIPE_METRICS_KEY` + `SLACK_REVENUE_BOT_TOKEN`
-  (conduit repo Actions secrets). Stripe key = conduit-prod's
+### Revenue reporting (`WYRE-AI/revenue-report`)
+- **What:** Three surfaces off one shared library:
+  1. *Daily report* — MRR, ARR run-rate, conduit/gateway split, trial roster
+     with conversion dates + card-on-file, day-over-day deltas.
+  2. *Period revenue* (`workflow_dispatch`, `mode=period`) — cash collected
+     in a range (paid invoices by paid-at − refunds): `mtd|qtd|ytd|
+     last-month|last-30d|2026-07|jul|"YYYY-MM-DD YYYY-MM-DD"`.
+  3. *`/revenue` Slack slash command* — live snapshot (no arg) or any period
+     expression; replies in-channel.
+- **Where:** `#sales-notifications` (WYRE AI Slack); daily weekdays
+  ~10:45 UTC.
+- **How:** `Revenue` workflow in `WYRE-AI/revenue-report` (snapshot →
+  `metrics-data` branch, seeded with full conduit-era history → post). Slash
+  command served by the **`revenue-slash` Cloudflare Worker** (source
+  `worker/`, deployed on the "WYRE Main" account,
+  `revenue-slash.wyre-main.workers.dev`) — verifies the Slack signature,
+  ACKs, computes against Stripe, replies via `response_url` with bot-post
+  fallback. Migrated 2026-08-26 from conduit's `Subscription Metrics`
+  workflow (now disabled; conduit itself was transferred to `WYRE-AI/conduit`).
+- **Credentials:** repo Actions secrets `STRIPE_METRICS_KEY` +
+  `SLACK_REVENUE_BOT_TOKEN`; worker secrets add `SLACK_SIGNING_SECRET`
+  (Infisical **secrets.wyre.ai**, `conduit` project,
+  `REVENUE_SLASH_SIGNING_SECRET`). Stripe key = conduit-prod's
   `stripe-secret-key` Container App secret — rotate together.
 - **Owner:** Aaron.
 
@@ -100,16 +111,20 @@ _Last updated: 2026-08-20 · Maintainer: Aaron Sachs (aaron@wyretechnology.com)_
 - **Purpose:** All sales/revenue posting (daily report + both sales notifiers).
 - **Manifest:** `wyre-technology/conduit` → `slack-app/revenue-reporter/`
   (includes README with rotation runbook + avatar asset).
-- **Scopes:** `chat:write`, `chat:write.public`, `chat:write.customize`.
+- **Scopes:** `chat:write`, `chat:write.public`, `chat:write.customize`,
+  `commands` (serves `/revenue`).
 - **Token copies:** `SLACK_REVENUE_BOT_TOKEN` (conduit repo secret),
-  `slack-sales-bot-token` (conduit-prod-kv, mcpgw-prod-kv).
+  `slack-sales-bot-token` (conduit-prod-kv, mcpgw-prod-kv),
+  worker secret on `revenue-slash` (`SLACK_REVENUE_BOT_TOKEN`) and
+  `WYRE-AI/revenue-report` repo secret.
 
 ### WYRE Notifier — app `A0BRK5LM57F`
 - **Purpose:** Shared outbound bot for all CI/automation notifications; each
   consumer stamps its own `username` + `icon_emoji`.
 - **Manifest:** `wyre-technology/.github` → `slack-app/notifier/`.
 - **Scopes:** `chat:write`, `chat:write.public`, `chat:write.customize`,
-  `canvases:write`.
+  `canvases:write`, `channels:history`, `channels:join` (member of
+  #sales-notifications for delivery verification).
 - **Token:** `SLACK_NOTIFIER_BOT_TOKEN` — **org-level** Actions secret,
   visible to all repos.
 
@@ -147,10 +162,13 @@ Any of these can be cut over with the WYRE Notifier pattern (§3) when wanted.
 | Slack (WYRE AI workspace) | Team comms + notification surface | Aaron | New workspace, 2026-08 |
 | Slack (wyretalk) | Legacy workspace | Aaron | Winding down; §5 items remain |
 | Zoom | Meetings | Aaron | Separate account, 2026-08 |
-| GitHub (wyre-technology org) | All code + CI + org Actions secrets | Aaron | |
+| GitHub (wyre-technology org) | Legacy code home + org Actions secrets | Aaron | Repos migrating to WYRE-AI (conduit transferred 2026-08-26; old URLs redirect) |
+| GitHub (WYRE-AI org) | New code home — conduit, revenue-report, node-* SDKs | Aaron | Needs its own org-level Slack secret when notifiers migrate |
 | Azure | All prod infra (conduit-prod, mcp-gateway-prod, afkbot, …) + Key Vaults | Aaron | |
 | Stripe (WYRE Technology LLC) | Billing — acct `acct_1IPBiHJqtDtyGs4x` | Aaron | |
 | Infisical (secrets.wyretechnology.com) | Fleet/agent secret store (`cortex-secret`) | Aaron | `HELPSCOUT_STRIPE_API_KEY` expired — needs rotation |
+| Infisical (secrets.wyre.ai) | New-entity secret store — `conduit` project (via `cortex-secret --context conduit`) | Aaron | Holds `REVENUE_SLASH_SIGNING_SECRET` |
+| Cloudflare ("WYRE Main" acct) | Workers (`revenue-slash`), DNS | Aaron | |
 | claude.ai (wyretechnology account) | Cloud routines, connectors | Aaron | Slack connector still points at wyretalk |
 | Microsoft 365 | **Pending — tenant spin-up planned 2026-08-21** | Aaron | Future docs home (SharePoint) |
 | HR platform | **Pending — selection/spin-up planned 2026-08-21** | Aaron | TBD |
