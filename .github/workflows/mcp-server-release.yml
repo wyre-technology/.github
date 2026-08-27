@@ -669,11 +669,63 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag_name }}
 
-      - name: Install mcp-publisher
+      # SUPPLY-CHAIN FIX (fast-follow to the concurrency PR on this file;
+      # reported by murph while investigating an unrelated stale task about
+      # mcp-publisher signature verification):
+      #
+      #   This job holds `id-token: write` and MCP Registry publish rights.
+      #   The old install step curl'd `.../releases/latest/download/...` and
+      #   piped straight into `tar xz` with no version pin, no checksum, and
+      #   no signature check — if the upstream release pipeline (or a single
+      #   asset) were ever compromised, this would execute arbitrary code
+      #   with our publish credentials on every release, fleet-wide.
+      #
+      #   Fix: pin to an exact tag and verify the tarball against upstream's
+      #   own Sigstore keyless-signing bundle (cosign verify-blob) BEFORE
+      #   extracting or executing anything. Identity/issuer below were read
+      #   directly out of the certificate embedded in the real v1.8.1
+      #   mcp-publisher_linux_amd64.tar.gz.sigstore.json bundle (SAN URI +
+      #   OIDC issuer extension), not guessed:
+      #     SAN: https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/v1.8.1
+      #     Issuer: https://token.actions.githubusercontent.com
+      #   That bundle is produced by upstream's own `.goreleaser.yaml`
+      #   (`cosign sign-blob --bundle=...` in keyless mode) driven by
+      #   `.github/workflows/release.yml` on `release: published`, which
+      #   confirms the SAN's `@refs/tags/vX.Y.Z` shape is the actual signer,
+      #   not an assumption.
+      #
+      #   Hardcoded to linux_amd64: this job always runs on ubuntu-latest
+      #   (GitHub-hosted x86_64), so the old uname-based OS/arch detection is
+      #   unneeded complexity. If this workflow ever moves to an ARM runner,
+      #   MCP_PUBLISHER_ASSET below must change too — it will NOT
+      #   auto-detect the way the old curl command did.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Download mcp-publisher (pinned release)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
         run: |
-          curl -fsSL \
-            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
-            | tar xz mcp-publisher
+          BASE_URL="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl -fsSL -o "${MCP_PUBLISHER_ASSET}"               "${BASE_URL}/${MCP_PUBLISHER_ASSET}"
+          curl -fsSL -o "${MCP_PUBLISHER_ASSET}.sigstore.json" "${BASE_URL}/${MCP_PUBLISHER_ASSET}.sigstore.json"
+
+      - name: Verify mcp-publisher signature (cosign / Sigstore keyless)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
+        run: |
+          cosign verify-blob \
+            --bundle "${MCP_PUBLISHER_ASSET}.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${MCP_PUBLISHER_ASSET}"
+
+      - name: Extract mcp-publisher
+        env:
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
+        run: tar xz -f "${MCP_PUBLISHER_ASSET}" mcp-publisher
 
       - name: Stamp version into server.json
         # server.json is committed with "0.0.0" placeholders; replace with the
