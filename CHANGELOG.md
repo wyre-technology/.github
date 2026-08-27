@@ -8,6 +8,27 @@ here. The format is based on
 
 ### Fixed
 
+- **`mcp-server-release.yml`**: added a workflow-level `concurrency` group.
+  No group meant near-simultaneous pushes to a caller's `main` (e.g. two
+  dependabot auto-merges seconds apart) could run this workflow twice in
+  parallel, both detect the same releasable HEAD via the existing git-tag
+  check, and race the MCP Registry publish step. Same mechanism confirmed
+  live via meraki-mcp's legacy inline workflow (`WYRE-AI/meraki-mcp#12`,
+  murph): 3 merges within 13s on 2026-08-21, 3 green Release runs, 3 failed
+  `cannot publish duplicate version` 400s.
+
+  Group is `release-${{ github.repository }}-${{ github.ref }}`.
+  `github.ref` alone already fully serializes the actual bug (same-repo,
+  near-simultaneous pushes to main) — GitHub scopes concurrency groups
+  per-repository automatically, even for a reusable workflow's own group
+  declaration, so two different callers of this workflow computing the
+  identical literal group string never queue against each other (verified
+  against GitHub's docs + community discussion before writing this).
+  `github.repository` is included purely for a self-documenting group name
+  in the Actions UI, not because it's required for correctness.
+  `cancel-in-progress: false` is deliberate — a queued run waits for the
+  in-flight release/publish to finish rather than cancelling it mid-publish.
+
 - **`mcp-server-release.yml`**: the `mcpb` job did not install the MCPB CLI, so
   it failed on 24 of the 26 repos with a `pack:mcpb` script. Pack scripts shell
   out to `npx mcpb pack`; only `autotask-mcp` and `blumira-mcp` carry
