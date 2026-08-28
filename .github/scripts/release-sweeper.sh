@@ -89,9 +89,12 @@ for repo in "${REPOS[@]}"; do
                 --title "chore(release): open the release gate ($total autonomous commit(s))" \
                 --body "Opens the release gate in mcp-server-release.yml — see that workflow and release-sweeper.yml for why. No code changes, one empty commit." 2>&1)"
     if [[ "$pr_url" == https://* ]]; then
-      # Best-effort: succeeds when the approving identity differs from the
-      # PR author (mirrors dependabot-janitor.sh); when it's the same App
-      # token on both sides this is expected to fail, which is fine — the
+      # Best-effort, and expected to fail every run: the App token mints
+      # both the PR and this approval, so it's a guaranteed self-approval
+      # rejection (unlike dependabot-janitor.sh, where the approving
+      # identity genuinely differs from the PR author, dependabot). Kept
+      # anyway in case that ever changes; the merge attempt right after is
+      # what actually decides the bucket, not this step's outcome — the
       # merge attempt right after is what actually decides the bucket.
       gh pr review "$pr_url" --approve \
         -b "Auto-approved by release-sweeper: empty gate-opener commit, no code changes." >/dev/null 2>&1
