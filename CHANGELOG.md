@@ -56,6 +56,64 @@ here. The format is based on
   autonomous, mixed autonomous+human, post-tag, and the sweeper's own commit
   correctly reopening the gate). Reaches the fleet by pin bump — no caller edits.
 
+- **`mcp-server-release.yml`**: added a workflow-level `concurrency` group.
+  No group meant near-simultaneous pushes to a caller's `main` (e.g. two
+  dependabot auto-merges seconds apart) could run this workflow twice in
+  parallel, both detect the same releasable HEAD via the existing git-tag
+  check, and race the MCP Registry publish step. Same mechanism confirmed
+  live via meraki-mcp's legacy inline workflow (`WYRE-AI/meraki-mcp#12`,
+  murph): 3 merges within 13s on 2026-08-21, 3 green Release runs, 3 failed
+  `cannot publish duplicate version` 400s.
+
+  Group is `release-${{ github.repository }}-${{ github.ref }}`.
+  `github.ref` alone already fully serializes the actual bug (same-repo,
+  near-simultaneous pushes to main) — GitHub scopes concurrency groups
+  per-repository automatically, even for a reusable workflow's own group
+  declaration, so two different callers of this workflow computing the
+  identical literal group string never queue against each other (verified
+  against GitHub's docs + community discussion before writing this).
+  `github.repository` is included purely for a self-documenting group name
+  in the Actions UI, not because it's required for correctness.
+  `cancel-in-progress: false` is deliberate — a queued run waits for the
+  in-flight release/publish to finish rather than cancelling it mid-publish.
+
+- **`dependabot-janitor.sh` / `dependabot-janitor.yml`**: added dual-org
+  support. The *-mcp/node-* fleet moved from being entirely under
+  `wyre-technology` to being split across `wyre-technology` (13 repos) and
+  `WYRE-AI` (50 repos, `conduit` included) sometime around 2026-08-24
+  evening/night. The janitor's repo enumeration was a single-org API call
+  (`ORG`, defaulting to `wyre-technology`), so it silently kept scanning
+  only the 13 repos still there — no error, just 50 of 63 repos never
+  looked at. Almost certainly the real explanation for a persistent
+  ~80-108-PR "chronic dependabot backlog" that multiple `scan-mcp-repos`
+  cycles reported as steady-state review-gating rather than what it
+  actually was: the janitor never reaching those repos at all.
+
+  `ORG` is now `ORGS` (space-separated, default `"wyre-technology
+  WYRE-AI"`, with `ORG` kept as a back-compat single-org override). Each
+  `REPOS` entry is now an `"org/name"` pair rather than a bare name, so
+  every downstream `gh ... -R` call targets the repo's real org directly.
+  Verified live: the new enumeration finds 105 repos in scope (85 WYRE-AI
+  + 20 wyre-technology, using the script's actual `-mcp$|^mcp|^node-`
+  pattern, broader than just the `*-mcp` fleet) vs. the ~20 the old
+  single-org call would have found.
+
+  **Not fully live yet — one line still gates it, left in place and
+  documented rather than silently forced.** The `wyre-projects-bot` App
+  (the one `APP_ID`/`APP_PRIVATE_KEY` mint tokens for) is confirmed NOT
+  installed on `WYRE-AI` (verified via `gh api orgs/WYRE-AI/installations`
+  — only `digitalocean`, `blacksmith-sh`, `vanta-with-task-management`,
+  and two `infisical` apps are). Adding `WYRE-AI` to the token-minting
+  step's `owner:` before that install exists risks failing token minting
+  outright rather than degrading gracefully (untested, and not worth
+  risking the currently-working `wyre-technology` half to find out) — so
+  `owner:` is left single-org for now, with the exact one-line change
+  documented inline for whoever does the App install. Meanwhile `ORGS`
+  already includes `WYRE-AI`, so every `WYRE-AI` repo will show up in the
+  run's Errors section (`pr list failed`, an auth failure) until the
+  install lands — expected, isolated per-repo (no crash, no effect on
+  `wyre-technology` repos), and turns a previously-invisible gap into a
+  visible, diagnosable one in the workflow's own summary output.
 
 - **`mcp-server-release.yml`**: the `mcpb` job did not install the MCPB CLI, so
   it failed on 24 of the 26 repos with a `pack:mcpb` script. Pack scripts shell
