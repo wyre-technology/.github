@@ -27,7 +27,7 @@ DRY_RUN="${DRY_RUN:-true}"
 TRAILER="${TRAILER:-Auto-Merged-By}"
 REPO_ALLOWLIST="${REPO_ALLOWLIST:-}"
 
-held=(); clean=(); notag=(); errs=()
+held=(); clean=(); notag=(); blocked=(); errs=()
 
 if [[ -n "$REPO_ALLOWLIST" ]]; then
   read -r -a REPOS <<<"$REPO_ALLOWLIST"
@@ -69,15 +69,44 @@ for repo in "${REPOS[@]}"; do
 
   if [[ "$DRY_RUN" == "true" ]]; then continue; fi
 
+  # Review-driven fix: a raw push to a protected default branch either fails
+  # outright or (worse) silently succeeds only on the subset of repos that
+  # happen not to have branch protection, which is not a distinction this
+  # script should be guessing at. Route through a PR + gh pr merge instead,
+  # the same shape dependabot-janitor.sh already uses, so protection is
+  # respected rather than raced: merge succeeds where nothing blocks it and
+  # cleanly reports "needs a human" everywhere else, instead of a push either
+  # silently landing or silently doing nothing.
   git -C "$dir" config user.name  "wyre-projects-bot[bot]"
   git -C "$dir" config user.email "wyre-projects-bot[bot]@users.noreply.github.com"
-  if git -C "$dir" commit --quiet --allow-empty \
-       -m "chore(release): batch ${total} autonomous merge(s) since ${last_tag}" \
-       -m "Opens the release gate in mcp-server-release.yml so semantic-release ships the accumulated Dependabot auto-merges as one release. Pushed by release-sweeper.yml." \
-     && git -C "$dir" push --quiet origin HEAD 2>/dev/null; then
-    :
+  branch="release-sweeper/$(date -u +%Y%m%d%H%M%S)-${total}"
+  if git -C "$dir" checkout --quiet -b "$branch" \
+       && git -C "$dir" commit --quiet --allow-empty \
+            -m "chore(release): batch ${total} autonomous merge(s) since ${last_tag}" \
+            -m "Opens the release gate in mcp-server-release.yml so semantic-release ships the accumulated Dependabot auto-merges as one release. Pushed by release-sweeper.yml." \
+       && git -C "$dir" push --quiet origin "$branch" 2>/dev/null; then
+    pr_url="$(gh pr create -R "$ORG/$repo" --head "$branch" \
+                --title "chore(release): open the release gate ($total autonomous commit(s))" \
+                --body "Opens the release gate in mcp-server-release.yml — see that workflow and release-sweeper.yml for why. No code changes, one empty commit." 2>&1)"
+    if [[ "$pr_url" == https://* ]]; then
+      # Best-effort: succeeds when the approving identity differs from the
+      # PR author (mirrors dependabot-janitor.sh); when it's the same App
+      # token on both sides this is expected to fail, which is fine — the
+      # merge attempt right after is what actually decides the bucket.
+      gh pr review "$pr_url" --approve \
+        -b "Auto-approved by release-sweeper: empty gate-opener commit, no code changes." >/dev/null 2>&1
+      if merge_err="$(gh pr merge "$pr_url" --squash --delete-branch 2>&1)"; then
+        :
+      elif grep -qiE 'review|code ?owner|protected|required|base branch policy|not mergeable|auto.?merge' <<<"$merge_err"; then
+        blocked+=("$repo: $pr_url (needs a human merge — branch protection)")
+      else
+        errs+=("$repo: PR opened ($pr_url) but merge failed: $(tr '\n' ' ' <<<"$merge_err" | head -c 160)")
+      fi
+    else
+      errs+=("$repo: branch pushed but PR create failed: $(tr '\n' ' ' <<<"$pr_url" | head -c 160)")
+    fi
   else
-    errs+=("$repo: commit/push failed")
+    errs+=("$repo: commit/branch/push failed")
   fi
 done
 
@@ -90,6 +119,7 @@ section() { local t="$1"; shift; echo "### $t ($#)"; for x in "$@"; do echo "- $
   section "📦 Held — batch shipped" "${held[@]+"${held[@]}"}"
   section "✅ Not held" "${clean[@]+"${clean[@]}"}"
   section "🏷️ No release tag yet (never held)" "${notag[@]+"${notag[@]}"}"
+  section "⏳ Blocked — PR opened, needs a human merge" "${blocked[@]+"${blocked[@]}"}"
   section "💥 Errors" "${errs[@]+"${errs[@]}"}"
 } | tee "$work/summary.md"
 

@@ -58,6 +58,12 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
-          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          # Review-driven fix: on the schedule trigger, inputs.dry_run does
+          # not exist (workflow_dispatch inputs are only populated for that
+          # event), and the original expression treated that as falsy ->
+          # DRY_RUN=false, so every scheduled fire defaulted to LIVE. Gate on
+          # event_name first so a missing input can never resolve to "live" --
+          # only an explicit workflow_dispatch with dry_run unchecked does.
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != false }}
           REPO_ALLOWLIST: ${{ inputs.repos }}
         run: bash .github/scripts/release-sweeper.sh
