@@ -8,6 +8,54 @@ here. The format is based on
 
 ### Fixed
 
+- **`scripts/set-required-checks.sh`**: the branch-protection PUT payload
+  hardcoded `restrictions: null` and omitted `lock_branch`/`allow_fork_syncing`
+  entirely, instead of reading and preserving their current values the way the
+  script already does for `required_pull_request_reviews`. Found reviewing
+  #55, which cites this script as already run live against 32 `*-mcp` repos.
+  Verified live against all 32 target repos (not the smaller spot-check from
+  the initial review): none currently have `restrictions`, `lock_branch`, or
+  `allow_fork_syncing` configured, so no repo was actually clobbered by the
+  gap — but the script mutates fleet-wide branch protection and was going to
+  run again, so it's fixed rather than left as a known footgun. Now
+  round-trips all three the same read-merge-write way as the review settings,
+  including converting `restrictions`' GET-shape (objects with `login`/`slug`)
+  to the PUT-shape it actually accepts (arrays of `login`/`slug` strings), and
+  extends the pre-write drift check that already guarded review settings to
+  cover these three fields too — the script refuses to write if any of them
+  would change, the same discipline it already applied to reviews.
+
+- **`mcp-server-release.yml`**: added a `gate` job that holds the release when
+  **every** commit since the last tag carries an `Auto-Merged-By:` trailer, plus
+  `release-sweeper.yml` + `release-sweeper.sh` to ship the held batch daily.
+  `dependabot-janitor.sh` now writes that trailer on its squash merges.
+
+  **Why:** a janitor dry run on 2026-08-17 would merge 118 PRs across 71 repos in
+  one sweep. Every caller's `release.yml` fires on `push: [main]`, so that is up
+  to 71 semantic-release → GHCR → Azure Container Apps deploys in a single
+  unbatched, unreviewed wave — into containers holding live customer API
+  credentials. The gate drops the blast radius from "71 production containers
+  rolled at 09:00 with nobody watching" to "main is briefly ahead of the
+  release".
+
+  **The rule is deliberately narrow.** Only an all-autonomous range is held. If a
+  human merged anything since the last tag they are taking responsibility for the
+  release, and the accumulated autonomous commits ship alongside — the normal
+  case, no ceremony.
+
+  **A gate with no opener is worse than no gate**, because the fleet would
+  silently stop releasing — the same silent-absence failure as the 27-day janitor
+  outage. `release-sweeper.yml` opens it by pushing one empty `chore(release):`
+  commit per held repo, which carries no trailer. `chore:` is not
+  version-bumping, so the version still reflects the accumulated `fix:`/`feat:`
+  commits. Chosen over `gh workflow run` because that needs `workflow_dispatch`
+  on all 58 thin callers; an empty commit needs nothing from the caller and
+  leaves an auditable "this batch shipped here" marker.
+
+  Gate logic verified against six cases (nothing-since-tag, 1 autonomous, 2
+  autonomous, mixed autonomous+human, post-tag, and the sweeper's own commit
+  correctly reopening the gate). Reaches the fleet by pin bump — no caller edits.
+
 - **`mcp-server-release.yml`**: added a workflow-level `concurrency` group.
   No group meant near-simultaneous pushes to a caller's `main` (e.g. two
   dependabot auto-merges seconds apart) could run this workflow twice in
