@@ -50,16 +50,21 @@ work="$(mktemp -d)"
 for cat in merged majors red pending conflicts blocked errors nocheck; do : > "$work/$cat"; done
 
 # Repos in scope, across every org in ORGS: names ending in -mcp, starting with
-# mcp, or starting with node-, minus anything in EXCLUDE_REPOS. Each entry is
-# "org/name" so downstream `-R` calls target the repo's real org directly —
-# no repo-name collisions expected across these two orgs, but if one ever
-# occurs both entries survive (sort -u dedupes exact "org/name" pairs, not
-# bare names), which is the conservative direction to fail in.
+# mcp, starting with node-, or exactly cortextos/conduit (added explicitly
+# rather than widening the pattern, since neither repo shares the mcp-server
+# shape this janitor was built for; task_1785692635899_03153380 — their own
+# Dependabot PRs get zero auto-merge coverage otherwise, agent-merge-janitor
+# deliberately excludes any package.json/lockfile touch, so this is their only
+# auto-merge lane), minus anything in EXCLUDE_REPOS. Each entry is "org/name"
+# so downstream `-R` calls target the repo's real org directly — no
+# repo-name collisions expected across these two orgs, but if one ever occurs
+# both entries survive (sort -u dedupes exact "org/name" pairs, not bare
+# names), which is the conservative direction to fail in.
 mapfile -t REPOS < <(
   for _org in $ORGS; do
     gh api --paginate "/orgs/$_org/repos?per_page=100" \
       --jq '.[] | select(.archived==false) | .name' \
-    | grep -E '(-mcp$|^mcp|^node-)' \
+    | grep -E '(-mcp$|^mcp|^node-|^cortextos$|^conduit$)' \
     | sed "s|^|$_org/|"
   done \
   | awk -F/ -v exclude="$EXCLUDE_REPOS" '
@@ -74,12 +79,65 @@ echo "Scanning ${#REPOS[@]} repositories in scope across: $ORGS"
 # Return the leading integer (major version) of a semver-ish string.
 major_of() { sed -E 's/^[^0-9]*([0-9]+).*/\1/' <<<"$1"; }
 
-# Classify a PR title as ELIGIBLE (patch/minor) or MAJOR.
-# Grouped Dependabot PRs are configured to contain only minor/patch updates.
+# Classify a PR as ELIGIBLE (patch/minor) or MAJOR.
+#
+# GAP-1 hardening (opened as #23 2026-05-26, rebased 2026-08-17 as #54, then
+# reconciled onto post-#66 dual-org main): a "group" PR is ELIGIBLE only if
+# EVERY dep inside it is same-major. The TITLE does not list the deps -- "bump
+# the dev-dependencies group with 12 updates" says nothing about what is in it
+# -- so parse the PR BODY's per-dep "from A to B" markers and major_of each.
+# FAIL-CLOSED: any cross-major, any unparseable marker, zero markers, or a
+# failed body fetch -> MAJOR (report, never merge), matching classify()'s
+# posture elsewhere.
+#
+# The shortcut this replaces (`group in title -> ELIGIBLE, unconditionally`) is
+# how node-datto-rmm#46 auto-merged a hidden typescript major and broke main on
+# 2026-07-21. #36 responded with a DOWNSTREAM guard, but only for grouped PRs
+# with NO CI -- a grouped PR with GREEN CI still rode the title shortcut with
+# no per-dep check at all. This closes the classifier itself.
+#
+# Update-type-scoped groups (e.g. npm-minor-patch) list only minor/patch bumps
+# and stay ELIGIBLE -- no behaviour change. Only a PATTERN-group bundling a
+# major flips. Measured 2026-08-17 against the live backlog: of 118 would-merge
+# PRs, 108 are grouped, and all 108 parse clean same-major. This is defence in
+# depth against a future group config, not a fix for a currently-firing break.
 classify() {
-  local title="$1"
-  if grep -qiE '\bgroup\b' <<<"$title"; then echo ELIGIBLE; return; fi
-  # "... from A.B.C to D.E.F"
+  local title="$1" num="$2" repo="$3"
+  if grep -qiE '\bgroup\b' <<<"$title"; then
+    # Fetch the body over REST, not `gh pr view` (which is GraphQL). Fail-closed
+    # is correct for a corrupt body, but during a GitHub GraphQL outage EVERY
+    # grouped PR would fail-closed and the whole backlog would stall behind a
+    # dependency this classifier does not actually need. Observed live
+    # 2026-08-17: GraphQL 503 for hours while REST stayed healthy, which made
+    # 40 of 108 grouped PRs unclassifiable in a scan using `gh pr view`.
+    #
+    # $repo is already "org/name" (dual-org REPOS format, #66) -- call REST
+    # directly as "repos/$repo/pulls/$num", do not prefix with $ORG/$ORGS here,
+    # that would double or misdirect the org, same footgun noted at the merge
+    # call below.
+    local body line deps=0 ok=0
+    body="$(gh api "repos/$repo/pulls/$num" --jq '.body // ""' 2>/dev/null </dev/null)" || { echo MAJOR; return; }
+    [[ -n "$body" ]] || { echo MAJOR; return; }   # empty/absent body -> fail-closed
+    while IFS= read -r line; do
+      # dependabot per-dep marker lines only: "Updates `pkg` from A to B"
+      [[ "$line" =~ (Updates|Bumps)[[:space:]]+\` ]] || continue
+      deps=$((deps+1))
+      # Deliberately NOT `[^\`[:space:]]`: inside a bracket expression that is the
+      # literal set { ` [ : s p a c e ] }, which does NOT exclude whitespace, so the
+      # capture runs greedy across " to " and yields nothing usable. Real Dependabot
+      # bodies write bare versions ("from 9.39.4 to 10.0.1"), so the simple class is
+      # both correct and sufficient. Verified against real bodies under bash 5.
+      if [[ "$line" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]] &&
+         [[ "$(major_of "${BASH_REMATCH[1]}")" == "$(major_of "${BASH_REMATCH[2]}")" ]]; then
+        ok=$((ok+1))
+      else
+        echo MAJOR; return   # marker line with no parseable same-major pair -> fail-closed
+      fi
+    done <<<"$body"
+    [[ "$deps" -gt 0 && "$ok" -eq "$deps" ]] && echo ELIGIBLE || echo MAJOR
+    return
+  fi
+  # single-update PR: "... from A.B.C to D.E.F"
   if [[ "$title" =~ from[[:space:]]+([0-9][^[:space:]]*)[[:space:]]+to[[:space:]]+([0-9][^[:space:]]*) ]]; then
     local from="${BASH_REMATCH[1]}" to="${BASH_REMATCH[2]}"
     if [[ "$(major_of "$from")" == "$(major_of "$to")" ]]; then echo ELIGIBLE; else echo MAJOR; fi
@@ -116,7 +174,7 @@ for repo in "${REPOS[@]}"; do
     label="$repo #$num — $title"
 
     devmajor=0
-    if [[ "$(classify "$title")" == "MAJOR" ]]; then
+    if [[ "$(classify "$title" "$num" "$repo")" == "MAJOR" ]]; then
       if is_dev_major "$title"; then
         devmajor=1   # dev/CI tooling major — eligible for auto-merge on green CI
       else

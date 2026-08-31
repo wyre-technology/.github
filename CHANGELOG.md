@@ -8,6 +8,89 @@ here. The format is based on
 
 ### Fixed
 
+- **`dependabot-janitor.sh`**: `classify()` no longer treats the word "group" in
+  a PR title as proof that the PR is minor/patch. It now parses the body's
+  per-dependency `Updates \`pkg\` from A to B` markers and requires **every** one
+  to be same-major, failing closed on any cross-major, unparseable marker, zero
+  markers, or failed body fetch. Supersedes #23, rebased as #54, and reconciled
+  here onto post-#66 dual-org `main` (the body fetch now calls
+  `repos/$repo/pulls/$num` directly since `$repo` is already `org/name`, rather
+  than the single-org `repos/$ORG/...` #54 was written against).
+
+  **This was live, not theoretical.** Measured against the backlog on
+  2026-08-17: of the 118 PRs a dry run would merge, 108 are grouped, and **69 of
+  those 108 (64%) contain at least one cross-major bump**, across 62 repos. The
+  blanket shortcut would have merged every one of them without inspecting a
+  single dependency.
+
+  `is_dev_major`'s allowlist is **not** a defence here — `classify()` returned
+  `ELIGIBLE` for grouped PRs *before* the dev-major check ran, so the grouped
+  path was strictly more permissive than the single-package path it sits beside.
+  Two of the 69 carry a genuinely runtime, non-allowlisted major:
+  `ironscales-mcp#38` and `salesbuildr-mcp#55`, both bumping the Docker base
+  image `node` from `22-alpine` to `26-alpine` — four majors, straight to
+  production on merge.
+
+  This is the same hole that broke `main` via `node-datto-rmm#46` on 2026-07-21.
+  #36 responded with a downstream guard, but only for grouped PRs with *no* CI;
+  a grouped PR with *green* CI still rode the title shortcut untouched.
+
+  Two changes beyond #23 as authored:
+  - **Body fetch moved from `gh pr view` (GraphQL) to `gh api` (REST).**
+    Fail-closed is right for a corrupt body, but during a GraphQL outage *every*
+    grouped PR would fail closed and the whole backlog would stall behind a
+    dependency the classifier does not need. Observed live on 2026-08-17: GraphQL
+    returned 503 for hours while REST stayed healthy, making 40 of 108 PRs
+    unclassifiable under `gh pr view` and 0 of 108 under `gh api`.
+  - **Version-capture regex uses `[^[:space:]]`, not `[^\`[:space:]]`.** Inside a
+    bracket expression the latter is the literal set `` { ` [ : s p a c e ] } ``,
+    which does not exclude whitespace, so the capture runs greedy across `" to "`
+    and yields nothing. A scan built on that construct — run under macOS
+    `/bin/bash` 3.2, where `BASH_REMATCH` additionally never populated —
+    reported all 108 grouped PRs clean. That false negative is what initially
+    mis-classified this hole as latent. `dependabot-janitor.test.sh` now refuses
+    to run unless a known-cross-major probe parses first.
+
+  Adds `.github/scripts/dependabot-janitor.test.sh` — 14 assertions, fixtures
+  taken from real Dependabot bodies (`abnormal-mcp#50`, `salesbuildr-mcp#55`)
+  rather than invented shapes.
+
+- **`dependabot-janitor.sh`**: `cortextos` and `conduit` are now in scope
+  (explicit carve-outs `^cortextos$|^conduit$` on the repo-selection regex),
+  reapplied from #50 onto the dual-org repo-enumeration loop #66 introduced
+  after #50 was opened — #50's own diff targeted the old single-org `grep`
+  pipeline and no longer applies cleanly, so the carve-out is added to the
+  `grep -E` call inside the current `for _org in $ORGS` loop instead. Neither
+  repo shares the mcp-server shape this janitor was built for
+  (task_1785692635899_03153380); their Dependabot PRs previously got zero
+  auto-merge coverage, since `agent-merge-janitor` deliberately excludes any
+  package.json/lockfile touch. This is their only auto-merge lane.
+
+- **`mcp-server-release.yml`**: the `release` job's "Detect released version"
+  step now runs with `if: always()`, and the `docker` job's gate is now
+  `if: always() && needs.release.outputs.released == 'true'`. Rebased from #26
+  onto current `main`, which carries a second, unrelated step also named
+  `id: detect` (inside the `mcpb` job, added since #26 was opened — it checks
+  for a `pack:mcpb` script, not release status). Confirmed by reading both:
+  they are different steps in different jobs serving different purposes, so
+  #26's fix applies to exactly the one release-detection occurrence and the one
+  `docker` gate, unchanged in scope from #26 as authored.
+
+  **Why:** semantic-release creates the tag and GitHub release, then pushes git
+  notes as its final action. A flaky/duplicate notes push ("cannot lock ref
+  refs/notes/semantic-release-…: reference already exists") fails the Semantic
+  Release step even though the release is already complete. Without
+  `if: always()`, the detect step (and everything gated on its output) was then
+  skipped — a published version with no image, no registry listing, and no
+  deploy. Detection keys off the tag-on-HEAD + GitHub release, not the step's
+  exit code, so a post-release hiccup can't silently drop artifact publishing.
+
+  Note: the `mcpb` job (added after #26 was opened) has an analogous
+  `needs.release.outputs.released == 'true'` gate without `always()`, and would
+  have the same latent skip-on-hiccup exposure — out of scope for this
+  reconciliation since it wasn't part of #26's reviewed diff and the job didn't
+  exist when #26 was authored; flagged here for a follow-up.
+
 - **`scripts/set-required-checks.sh`**: the branch-protection PUT payload
   hardcoded `restrictions: null` and omitted `lock_branch`/`allow_fork_syncing`
   entirely, instead of reading and preserving their current values the way the
