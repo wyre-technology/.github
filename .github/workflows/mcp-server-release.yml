@@ -104,11 +104,39 @@ name: MCP Server Release (reusable)
 #   itself for the full detail and why this is a new parallel job rather than
 #   a restructure of `release`'s own (unchanged) steps.
 #
+# SIXTH BUG FIXED: a non-fatal failure AFTER the release was cut skipped artifacts.
+#
+#   semantic-release creates the tag and GitHub release, then pushes git notes
+#   as its final action. A flaky/duplicate notes push ("cannot lock ref
+#   refs/notes/semantic-release-…: reference already exists") fails the
+#   Semantic Release step even though the release is already complete. The
+#   detect step (no `if:`) was then skipped, `released` was never set, and
+#   docker/registry/security all skipped — a published version with no image,
+#   no registry listing, and no deploy.
+#
+#   Fix: the detect step runs with `if: always()`, and docker gates on
+#   `always() && released == 'true'`. Detection keys off the tag-on-HEAD +
+#   GitHub release, not the step's exit code, so a post-release hiccup can't
+#   silently drop artifact publishing.
+#
+#   Scope note: the `mcpb` job below (added after this fix was first authored)
+#   has an analogous `needs.release.outputs.released == 'true'` gate without
+#   `always()`, and its own separately-named `id: detect` step checks for a
+#   `pack:mcpb` script — an unrelated purpose, not a duplicate of this
+#   release-detection logic. `mcpb`'s gate carries the same latent
+#   skip-on-post-release-hiccup exposure this fix closes for `docker`, but is
+#   deliberately left unchanged here — out of scope for this fix, flagged for
+#   a follow-up.
+#
 # GATING CONTRACT:
 #   verify       ← unconditional. Runs on push AND pull_request alike.
 #   release      ← push-to-main only, AND needs: [verify].
-#   docker       ← runs only when release.outputs.released == 'true'
-#   mcpb         ← same gate, in its own job needing only `release`, so a pack
+#   detect       ← always() so it runs even if Semantic Release exited non-zero
+#                  after cutting the release; sets released from tag-on-HEAD.
+#   docker       ← always() && released == 'true' (a red release job that still
+#                  cut a release must not skip the build).
+#   mcpb         ← same released == 'true' gate (without always(), see scope
+#                  note above), in its own job needing only `release`, so a pack
 #                  failure does not stop docker/mcp-registry/security from
 #                  running here. NOTE: that is workflow-internal only. Callers
 #                  invoke this file as ONE job, so any failure here fails the
@@ -404,6 +432,16 @@ jobs:
 
       - name: Detect released version
         id: detect
+        # always() so detection still runs when the Semantic Release step exited
+        # non-zero AFTER cutting the release. semantic-release creates the tag and
+        # GitHub release, then pushes git notes as its final action; a flaky or
+        # duplicate notes push ("cannot lock ref refs/notes/semantic-release-…:
+        # reference already exists") fails the step even though the release is
+        # already complete. Detecting from the tag-on-HEAD + GitHub release (not
+        # the step's exit code) means such a hiccup can't silently skip the
+        # docker / registry / security jobs. A genuine pre-release failure leaves
+        # no tag on HEAD, so released stays false.
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -445,7 +483,13 @@ jobs:
     # produced an empty version output, docker still ran and hit the
     # "RELEASE_VERSION is empty" guard, silently cascading mcp-registry to
     # `skipped`. Now docker simply does not run unless a real release was cut.
-    if: needs.release.outputs.released == 'true'
+    #
+    # always() so a non-fatal failure in the release job (e.g. semantic-release's
+    # final git-notes push) can't skip the build once a release was actually cut.
+    # Without always(), a red release job skips docker regardless of the output;
+    # the released == 'true' guard (set by the always() detect step above) still
+    # prevents building on no-op pushes.
+    if: always() && needs.release.outputs.released == 'true'
     permissions:
       contents: read
       packages: write
