@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
-# Agent Merge Janitor: flags human/agent-authored (non-Dependabot) PRs on
-# cortextos + conduit that pass a tight, conservative eligibility bar for
-# the low-risk auto-merge lane (task_1785685546659). Complements
-# dependabot-janitor.sh, which only covers Dependabot PRs on -mcp/node- repos.
+# Agent Merge Janitor: flags human/agent-authored (non-Dependabot) PRs on the
+# repos in REPOS (default: cortextos; see the note above REPOS' default for
+# why conduit is currently excluded) that pass a tight, conservative
+# eligibility bar for the low-risk auto-merge lane (task_1785685546659).
+# Complements dependabot-janitor.sh, which only covers Dependabot PRs on
+# -mcp/node- repos.
 #
 # THIS SCRIPT NEVER MERGES. Per the design's trust-model finding: the
 # wyre-agent-fleet App credential (used to post the GO-signal review) is
@@ -36,7 +38,9 @@
 #
 # Env:
 #   ORG        GitHub org (default: wyre-technology)
-#   REPOS      space-separated repo list (default: "cortextos conduit")
+#   REPOS      space-separated repo list (default: "cortextos"). conduit is
+#              deliberately OMITTED — see the note above REPOS' default below
+#              before re-adding it.
 #   DRY_RUN    if "true" (default), classify + report only — never touches
 #              labels or posts comments, even on a failed re-verify.
 #   BACKLOG_FILE  path to write the human-readable summary (default:
@@ -49,7 +53,25 @@
 set -uo pipefail
 
 ORG="${ORG:-wyre-technology}"
-REPOS="${REPOS:-cortextos conduit}"
+
+# conduit moved from wyre-technology to the WYRE-AI org on 2026-08-25 and the
+# wyre-agent-fleet GitHub App used to mint this script's GH_TOKEN is installed
+# ONLY on wyre-technology (confirmed via the /app/installations API — no
+# WYRE-AI installation). Since the move, "conduit" has not resolved under
+# $ORG at all, but `gh pr list -R wyre-technology/conduit --label
+# auto-merge-ready --json ...` (the exact call this script makes) does NOT
+# error on that — it silently returns an empty `[]` at rc=0, verified live
+# 2026-09-02. Every run since 2026-08-25 therefore read "conduit doesn't
+# resolve here" as "conduit has zero eligible PRs," a false all-clear with no
+# error anywhere in the output (murph, task_1788354182960_04095147).
+#
+# Do NOT re-add "conduit" to REPOS until the App is installed on WYRE-AI
+# (org-admin action, tracked separately as task_1788354249320_29879105) —
+# and even then it needs a real WYRE-AI/conduit target, not a bare "conduit"
+# resolved against the wyre-technology $ORG default. The unresolvable-repo
+# guard below will now fail the run loudly if this is done prematurely,
+# instead of silently going blind again.
+REPOS="${REPOS:-cortextos}"
 DRY_RUN="${DRY_RUN:-true}"
 BACKLOG_FILE="${BACKLOG_FILE:-agent-merge-backlog.md}"
 LABEL="auto-merge-ready"
@@ -185,14 +207,29 @@ latest_bot_approval() {
     | jq -r '[.[] | select(.state=="APPROVED") | select(.user.type=="Bot")] | sort_by(.submitted_at) | last | select(. != null) | "\(.user.login) \(.commit_id)"'
 }
 
+# Unresolvable-repo guard. `gh pr list -R $ORG/$repo --label ... --json ...`
+# (the call scan_one_repo's caller makes below) does NOT error when
+# "$ORG/$repo" doesn't resolve — moved, renamed, deleted, or the App just
+# lacks access — it silently prints an empty `[]` at rc=0, which reads
+# exactly like "repo scanned, zero eligible PRs." That was the whole
+# conduit incident (see the note above REPOS' default). Returns 0 (resolves)
+# or 1 (does not) via exit code; never prints on the happy path.
+check_repo_resolves() {
+  local repo="$1"
+  gh repo view "$ORG/$repo" --json name >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # Main scan
 #
 # PR_OVERRIDE (optional): space-separated "repo:number" pairs, e.g.
-# "cortextos:14 cortextos:16 conduit:878". Bypasses the open+labeled PR
-# listing entirely — used for retroactive validation against already
-# closed/merged PRs (label/open-state don't apply retroactively; CI/review
-# history does, since GitHub keeps it). Live/scheduled runs never set this.
+# "cortextos:14 cortextos:16". Bypasses the open+labeled PR listing (and the
+# REPOS pre-flight guard below, which only gates that listing) entirely —
+# used for retroactive validation against already closed/merged PRs
+# (label/open-state don't apply retroactively; CI/review history does, since
+# GitHub keeps it). Live/scheduled runs never set this. Each pair is always
+# resolved against $ORG, same as REPOS — it cannot target a repo under a
+# different org.
 # ---------------------------------------------------------------------------
 
 scan_one_repo() {
@@ -265,6 +302,23 @@ if [[ -n "${PR_OVERRIDE:-}" ]]; then
     scan_one_repo "$repo" "[$one]"
   done
 else
+  # Pre-flight: verify every repo in REPOS actually resolves under $ORG
+  # BEFORE any scanning starts. See check_repo_resolves() above for why this
+  # can't be left to the pr-list call itself to catch. Run once per repo,
+  # up front, so a bad REPOS entry is one loud failure instead of N silent
+  # empty scans.
+  unresolvable=()
+  for repo in $REPOS; do
+    check_repo_resolves "$repo" || unresolvable+=("$ORG/$repo")
+  done
+  if [[ "${#unresolvable[@]}" -gt 0 ]]; then
+    echo "FATAL: the following repo(s) in REPOS do not resolve under ORG=$ORG: ${unresolvable[*]}" >&2
+    echo "Refusing to scan — a repo that doesn't resolve returns an empty PR list, not an error, and would otherwise be silently reported as \"zero eligible PRs\" instead of \"unreachable.\"" >&2
+    echo "Fix REPOS/ORG (has the repo moved orgs, been renamed, or deleted?) or confirm the GitHub App is installed where the repo now lives, then re-run." >&2
+    rm -rf "$work"
+    exit 1
+  fi
+
   for repo in $REPOS; do
     prs="$(gh pr list -R "$ORG/$repo" --state open --label "$LABEL" \
           --json number,title,author,isDraft,mergeable,mergeStateStatus,headRefOid,reviewDecision 2>/dev/null)" \

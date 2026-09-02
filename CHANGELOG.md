@@ -8,6 +8,34 @@ here. The format is based on
 
 ### Fixed
 
+- **`agent-merge-janitor.sh`**: dropped `conduit` from the default `REPOS` and
+  added a pre-flight unresolvable-repo guard, closing a silent blind spot
+  (murph, task_1788354182960_04095147). `conduit` moved from `wyre-technology`
+  to the `WYRE-AI` org on 2026-08-25; the `wyre-agent-fleet` App used to mint
+  this script's `GH_TOKEN` is installed only on `wyre-technology`
+  (`task_1788354249320_29879105` tracks getting it installed on `WYRE-AI`).
+  Since the move, `gh pr list -R wyre-technology/conduit --label
+  auto-merge-ready --json ...` — the exact call this script makes — has not
+  errored; it silently returns an empty `[]` at rc=0, which every run since
+  read as "conduit has zero eligible PRs" instead of "conduit is
+  unreachable." Verified live 2026-09-02, both the bug and the fix:
+  ```
+  gh pr list -R wyre-technology/conduit --label auto-merge-ready --json number   # []  rc=0  (silent, unchanged)
+  gh repo view wyre-technology/conduit                                            # GraphQL error, rc=1
+  REPOS="cortextos conduit" ./agent-merge-janitor.sh                              # was: silent 0-PR scan
+                                                                                   # now: FATAL, exit 1, before any scanning
+  ```
+  The new `check_repo_resolves()` guard runs once per repo in `REPOS` before
+  the labeled-PR listing loop starts (`gh repo view "$ORG/$repo"`, not the
+  listing call itself, since that's the one call proven not to error on this
+  condition); if any repo doesn't resolve, the script prints which repo(s)
+  and exits 1 instead of writing a backlog. Reproduced against a second,
+  wholly fictitious repo name to confirm this isn't a conduit-specific patch
+  — any future unresolvable entry in `REPOS` now fails the same way.
+  `cortextos` (and any other repo that still resolves under `wyre-technology`)
+  is unaffected and continues to scan normally. Do not re-add `conduit` to
+  `REPOS` until the App installation gap above is closed.
+
 - **`dependabot-janitor.sh`**: `classify()` no longer treats the word "group" in
   a PR title as proof that the PR is minor/patch. It now parses the body's
   per-dependency `Updates \`pkg\` from A to B` markers and requires **every** one
