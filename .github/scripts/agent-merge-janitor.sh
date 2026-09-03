@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # Agent Merge Janitor: flags human/agent-authored (non-Dependabot) PRs on the
-# repos in REPOS (default: cortextos; see the note above REPOS' default for
-# why conduit is currently excluded) that pass a tight, conservative
-# eligibility bar for the low-risk auto-merge lane (task_1785685546659).
+# repos in REPOS (default: "cortextos conduit", both under the WYRE-AI org —
+# see the note above REPOS' default for the org-transfer history) that pass a
+# tight, conservative eligibility bar for the low-risk auto-merge lane
+# (task_1785685546659).
 # Complements dependabot-janitor.sh, which only covers Dependabot PRs on
 # -mcp/node- repos.
 #
@@ -31,16 +32,14 @@
 # and this script's re-check catches that automatically — no separate
 # SHA-in-text convention needed.
 #
-#   GH_TOKEN=$(cortextos bus gh-app-token) \
-#     gh pr review <n> -R wyre-technology/<repo> --approve \
+#   GH_TOKEN=$(cortextos bus gh-app-token --org WYRE-AI) \
+#     gh pr review <n> -R WYRE-AI/<repo> --approve \
 #     -b "AUTO-MERGE-GO <reviewing-agent> <head-sha>"
-#   gh pr edit <n> -R wyre-technology/<repo> --add-label auto-merge-ready
+#   gh pr edit <n> -R WYRE-AI/<repo> --add-label auto-merge-ready
 #
 # Env:
-#   ORG        GitHub org (default: wyre-technology)
-#   REPOS      space-separated repo list (default: "cortextos"). conduit is
-#              deliberately OMITTED — see the note above REPOS' default below
-#              before re-adding it.
+#   ORG        GitHub org (default: WYRE-AI)
+#   REPOS      space-separated repo list (default: "cortextos conduit")
 #   DRY_RUN    if "true" (default), classify + report only — never touches
 #              labels or posts comments, even on a failed re-verify.
 #   BACKLOG_FILE  path to write the human-readable summary (default:
@@ -52,26 +51,25 @@
 # is the reviewing agent's job, done by hand, under their own diligence.
 set -uo pipefail
 
-ORG="${ORG:-wyre-technology}"
-
-# conduit moved from wyre-technology to the WYRE-AI org on 2026-08-25 and the
-# wyre-agent-fleet GitHub App used to mint this script's GH_TOKEN is installed
-# ONLY on wyre-technology (confirmed via the /app/installations API — no
-# WYRE-AI installation). Since the move, "conduit" has not resolved under
-# $ORG at all, but `gh pr list -R wyre-technology/conduit --label
-# auto-merge-ready --json ...` (the exact call this script makes) does NOT
-# error on that — it silently returns an empty `[]` at rc=0, verified live
-# 2026-09-02. Every run since 2026-08-25 therefore read "conduit doesn't
-# resolve here" as "conduit has zero eligible PRs," a false all-clear with no
-# error anywhere in the output (murph, task_1788354182960_04095147).
-#
-# Do NOT re-add "conduit" to REPOS until the App is installed on WYRE-AI
-# (org-admin action, tracked separately as task_1788354249320_29879105) —
-# and even then it needs a real WYRE-AI/conduit target, not a bare "conduit"
-# resolved against the wyre-technology $ORG default. The unresolvable-repo
-# guard below will now fail the run loudly if this is done prematurely,
-# instead of silently going blind again.
-REPOS="${REPOS:-cortextos}"
+# --- Org-transfer history (why ORG/REPOS look the way they do) -------------
+# conduit moved from wyre-technology to WYRE-AI on 2026-08-25; cortextos
+# followed on 2026-08-31 — both scanned repos now live under WYRE-AI. The
+# wyre-agent-fleet GitHub App's installation moved with them (Aaron installed
+# it on WYRE-AI 2026-09-03, confirmed live via `gh-app-token --org WYRE-AI`
+# minting a real token, installation_id=158846229; task_1788354249320_29879105
+# closed). A bare `gh pr list -R <org>/<repo> --label ... --json ...` (the
+# exact call this script makes) does NOT error when "<org>/<repo>" doesn't
+# resolve — it silently returns an empty `[]` at rc=0, which reads exactly
+# like "repo scanned, zero eligible PRs." That's what made conduit's absence
+# invisible for over a week after its own move (murph,
+# task_1788354182960_04095147) — CORTEXTOS was still fine at the time because
+# it hadn't moved yet; if ORG/REPOS ever again point at an org+repo pairing
+# that's stale, the SAME silent-blind-spot shape recurs for whatever repo it
+# hits. The unresolvable-repo guard below exists precisely so that keeps
+# failing loudly instead of going blind again — if you're re-pointing this at
+# a new org or repo, trust that guard's exit-1, not a clean "0 eligible."
+ORG="${ORG:-WYRE-AI}"
+REPOS="${REPOS:-cortextos conduit}"
 DRY_RUN="${DRY_RUN:-true}"
 BACKLOG_FILE="${BACKLOG_FILE:-agent-merge-backlog.md}"
 LABEL="auto-merge-ready"
