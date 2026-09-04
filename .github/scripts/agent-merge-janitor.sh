@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# Agent Merge Janitor: flags human/agent-authored (non-Dependabot) PRs on
-# cortextos + conduit that pass a tight, conservative eligibility bar for
-# the low-risk auto-merge lane (task_1785685546659). Complements
-# dependabot-janitor.sh, which only covers Dependabot PRs on -mcp/node- repos.
+# Agent Merge Janitor: flags human/agent-authored (non-Dependabot) PRs on the
+# repos in REPOS (default: "cortextos conduit", both under the WYRE-AI org —
+# see the note above REPOS' default for the org-transfer history) that pass a
+# tight, conservative eligibility bar for the low-risk auto-merge lane
+# (task_1785685546659).
+# Complements dependabot-janitor.sh, which only covers Dependabot PRs on
+# -mcp/node- repos.
 #
 # THIS SCRIPT NEVER MERGES. Per the design's trust-model finding: the
 # wyre-agent-fleet App credential (used to post the GO-signal review) is
@@ -29,13 +32,13 @@
 # and this script's re-check catches that automatically — no separate
 # SHA-in-text convention needed.
 #
-#   GH_TOKEN=$(cortextos bus gh-app-token) \
-#     gh pr review <n> -R wyre-technology/<repo> --approve \
+#   GH_TOKEN=$(cortextos bus gh-app-token --org WYRE-AI) \
+#     gh pr review <n> -R WYRE-AI/<repo> --approve \
 #     -b "AUTO-MERGE-GO <reviewing-agent> <head-sha>"
-#   gh pr edit <n> -R wyre-technology/<repo> --add-label auto-merge-ready
+#   gh pr edit <n> -R WYRE-AI/<repo> --add-label auto-merge-ready
 #
 # Env:
-#   ORG        GitHub org (default: wyre-technology)
+#   ORG        GitHub org (default: WYRE-AI)
 #   REPOS      space-separated repo list (default: "cortextos conduit")
 #   DRY_RUN    if "true" (default), classify + report only — never touches
 #              labels or posts comments, even on a failed re-verify.
@@ -48,7 +51,24 @@
 # is the reviewing agent's job, done by hand, under their own diligence.
 set -uo pipefail
 
-ORG="${ORG:-wyre-technology}"
+# --- Org-transfer history (why ORG/REPOS look the way they do) -------------
+# conduit moved from wyre-technology to WYRE-AI on 2026-08-25; cortextos
+# followed on 2026-08-31 — both scanned repos now live under WYRE-AI. The
+# wyre-agent-fleet GitHub App's installation moved with them (Aaron installed
+# it on WYRE-AI 2026-09-03, confirmed live via `gh-app-token --org WYRE-AI`
+# minting a real token, installation_id=158846229; task_1788354249320_29879105
+# closed). A bare `gh pr list -R <org>/<repo> --label ... --json ...` (the
+# exact call this script makes) does NOT error when "<org>/<repo>" doesn't
+# resolve — it silently returns an empty `[]` at rc=0, which reads exactly
+# like "repo scanned, zero eligible PRs." That's what made conduit's absence
+# invisible for over a week after its own move (murph,
+# task_1788354182960_04095147) — CORTEXTOS was still fine at the time because
+# it hadn't moved yet; if ORG/REPOS ever again point at an org+repo pairing
+# that's stale, the SAME silent-blind-spot shape recurs for whatever repo it
+# hits. The unresolvable-repo guard below exists precisely so that keeps
+# failing loudly instead of going blind again — if you're re-pointing this at
+# a new org or repo, trust that guard's exit-1, not a clean "0 eligible."
+ORG="${ORG:-WYRE-AI}"
 REPOS="${REPOS:-cortextos conduit}"
 DRY_RUN="${DRY_RUN:-true}"
 BACKLOG_FILE="${BACKLOG_FILE:-agent-merge-backlog.md}"
@@ -185,14 +205,29 @@ latest_bot_approval() {
     | jq -r '[.[] | select(.state=="APPROVED") | select(.user.type=="Bot")] | sort_by(.submitted_at) | last | select(. != null) | "\(.user.login) \(.commit_id)"'
 }
 
+# Unresolvable-repo guard. `gh pr list -R $ORG/$repo --label ... --json ...`
+# (the call scan_one_repo's caller makes below) does NOT error when
+# "$ORG/$repo" doesn't resolve — moved, renamed, deleted, or the App just
+# lacks access — it silently prints an empty `[]` at rc=0, which reads
+# exactly like "repo scanned, zero eligible PRs." That was the whole
+# conduit incident (see the note above REPOS' default). Returns 0 (resolves)
+# or 1 (does not) via exit code; never prints on the happy path.
+check_repo_resolves() {
+  local repo="$1"
+  gh repo view "$ORG/$repo" --json name >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # Main scan
 #
 # PR_OVERRIDE (optional): space-separated "repo:number" pairs, e.g.
-# "cortextos:14 cortextos:16 conduit:878". Bypasses the open+labeled PR
-# listing entirely — used for retroactive validation against already
-# closed/merged PRs (label/open-state don't apply retroactively; CI/review
-# history does, since GitHub keeps it). Live/scheduled runs never set this.
+# "cortextos:14 cortextos:16". Bypasses the open+labeled PR listing (and the
+# REPOS pre-flight guard below, which only gates that listing) entirely —
+# used for retroactive validation against already closed/merged PRs
+# (label/open-state don't apply retroactively; CI/review history does, since
+# GitHub keeps it). Live/scheduled runs never set this. Each pair is always
+# resolved against $ORG, same as REPOS — it cannot target a repo under a
+# different org.
 # ---------------------------------------------------------------------------
 
 scan_one_repo() {
@@ -265,6 +300,23 @@ if [[ -n "${PR_OVERRIDE:-}" ]]; then
     scan_one_repo "$repo" "[$one]"
   done
 else
+  # Pre-flight: verify every repo in REPOS actually resolves under $ORG
+  # BEFORE any scanning starts. See check_repo_resolves() above for why this
+  # can't be left to the pr-list call itself to catch. Run once per repo,
+  # up front, so a bad REPOS entry is one loud failure instead of N silent
+  # empty scans.
+  unresolvable=()
+  for repo in $REPOS; do
+    check_repo_resolves "$repo" || unresolvable+=("$ORG/$repo")
+  done
+  if [[ "${#unresolvable[@]}" -gt 0 ]]; then
+    echo "FATAL: the following repo(s) in REPOS do not resolve under ORG=$ORG: ${unresolvable[*]}" >&2
+    echo "Refusing to scan — a repo that doesn't resolve returns an empty PR list, not an error, and would otherwise be silently reported as \"zero eligible PRs\" instead of \"unreachable.\"" >&2
+    echo "Fix REPOS/ORG (has the repo moved orgs, been renamed, or deleted?) or confirm the GitHub App is installed where the repo now lives, then re-run." >&2
+    rm -rf "$work"
+    exit 1
+  fi
+
   for repo in $REPOS; do
     prs="$(gh pr list -R "$ORG/$repo" --state open --label "$LABEL" \
           --json number,title,author,isDraft,mergeable,mergeStateStatus,headRefOid,reviewDecision 2>/dev/null)" \

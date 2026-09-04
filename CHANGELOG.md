@@ -8,6 +8,45 @@ here. The format is based on
 
 ### Fixed
 
+- **`agent-merge-janitor.sh`**: added a pre-flight unresolvable-repo guard,
+  closing a silent blind spot (murph, task_1788354182960_04095147). `conduit`
+  moved from `wyre-technology` to the `WYRE-AI` org on 2026-08-25, and `gh pr
+  list -R wyre-technology/conduit --label auto-merge-ready --json ...` — the
+  exact call this script makes — did not error on that; it silently returned
+  an empty `[]` at rc=0, which every run since read as "conduit has zero
+  eligible PRs" instead of "conduit is unreachable." Verified live
+  2026-09-02, both the bug and the fix:
+  ```
+  gh pr list -R wyre-technology/conduit --label auto-merge-ready --json number   # []  rc=0  (silent, unchanged)
+  gh repo view wyre-technology/conduit                                            # GraphQL error, rc=1
+  REPOS="cortextos conduit" ./agent-merge-janitor.sh                              # was: silent 0-PR scan
+                                                                                   # now: FATAL, exit 1, before any scanning
+  ```
+  The new `check_repo_resolves()` guard runs once per repo in `REPOS` before
+  the labeled-PR listing loop starts (`gh repo view "$ORG/$repo"`, not the
+  listing call itself, since that's the one call proven not to error on this
+  condition); if any repo doesn't resolve, the script prints which repo(s)
+  and exits 1 instead of writing a backlog. Reproduced against a second,
+  wholly fictitious repo name to confirm this isn't a conduit-specific patch
+  — any future unresolvable entry in `REPOS` now fails the same way.
+
+  **Revised 2026-09-03, later the same day the App-installation gap closed.**
+  The first version of this fix (above) dropped `conduit` from `REPOS`
+  entirely, since the `wyre-agent-fleet` App used to mint this script's
+  `GH_TOKEN` was installed only on `wyre-technology` at the time
+  (`task_1788354249320_29879105`), and `cortextos` was still resolving under
+  `wyre-technology` too. Both of those have since changed: `cortextos`
+  finished its own move to `WYRE-AI` on 2026-08-31, and Aaron installed the
+  App on `WYRE-AI` on 2026-09-03 (confirmed live: minting a real token,
+  `installation_id=158846229`; task closed). `ORG` now defaults to `WYRE-AI`
+  and `REPOS` is back to `"cortextos conduit"` — both repos live under the
+  same org today, so no per-repo org override is needed. The guard above is
+  unchanged and is exactly why this revision is safe: verified live that
+  both repos resolve under `WYRE-AI` and the script runs clean end to end
+  (dry-run, exit 0); independently cross-checked the resulting "0 eligible
+  PRs" against `gh pr list --label auto-merge-ready` directly on both repos,
+  not just the script's own zero.
+
 - **`dependabot-janitor.sh`**: `classify()` no longer treats the word "group" in
   a PR title as proof that the PR is minor/patch. It now parses the body's
   per-dependency `Updates \`pkg\` from A to B` markers and requires **every** one
