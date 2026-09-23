@@ -1,0 +1,59 @@
+name: Janitor liveness
+
+# Deadman check for dependabot-janitor.
+#
+# WHY: between 2026-07-21 and 2026-08-17 the janitor sat `disabled_manually`
+# and nothing noticed for 27 days, while the Dependabot backlog grew past 240
+# open PRs. It produced ZERO failed runs in that window — because it produced
+# zero runs — so every failure-watching signal was silent by construction.
+# Watching for a failed run cannot catch a job that never starts. This watches
+# for ABSENCE instead, which is the failure mode that actually happened.
+#
+# It also checks the backlog artifact: dependabot-janitor.sh writes
+# dependabot-backlog.md for a downstream digest routine, and that file has
+# never been committed to main (404) — the same silent failure one hop
+# downstream, live for as long as the janitor has existed.
+#
+# Runs on a 6-hourly off-minute cadence (see ADR note in the PR): frequent
+# enough that a stalled janitor is caught within a quarter-day, rare enough
+# that the escalation policy has room to back off without going silent.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *' # 6-hourly, off the :00 mark
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log the intended Slack post without sending it'
+        type: boolean
+        default: false
+      stale_hours:
+        description: 'Hours without a completed run before alerting'
+        type: string
+        default: '36'
+
+concurrency:
+  group: janitor-liveness
+  cancel-in-progress: false
+
+permissions:
+  contents: read # read dependabot-backlog.md
+  actions: read # read dependabot-janitor workflow + run history
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Assess janitor liveness
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Falls back to the existing #github-activity webhook so this works on
+          # day one with no new Slack setup; point it at a dedicated channel by
+          # setting SLACK_JANITOR_LIVENESS_WEBHOOK_URL.
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_JANITOR_LIVENESS_WEBHOOK_URL || secrets.SLACK_GITHUB_ACTIVITY_WEBHOOK_URL }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          STALE_HOURS: ${{ inputs.stale_hours || '36' }}
+        run: node scripts/janitor-liveness.mjs
