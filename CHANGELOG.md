@@ -6,6 +6,45 @@ here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/fleet-triage.md`**: design for a scheduled Claude routine covering the
+  org-wide PR/issue automation that `dependabot-janitor` does not — liveness,
+  issues, non-Dependabot PRs, the code-owner-blocked backlog, release
+  decoupling, and agent-authored fixes. Explicitly *not* a second merge policy:
+  Dependabot merging stays `dependabot-janitor.sh`'s job and the routine
+  consumes its output buckets rather than re-classifying.
+
+  Written after a survey on 2026-08-17 found two silent absence-of-signal
+  failures running concurrently: `dependabot-janitor` has been
+  `disabled_manually` since 2026-07-21 (27 days, 241 open Dependabot PRs) with
+  nothing alerting on the gap, and `dependabot-backlog.md` — which
+  `dependabot-janitor.sh` writes and whose comments name a downstream weekly
+  digest routine as its consumer — **404s on `main`** and has never been
+  committed. Neither is reachable by hardening the merge policy, which is where
+  all prior effort went (#28, #36, #38, #23), so liveness is component 1.
+
+  The survey also found, against `main`:
+  - `required_status_checks` is `NULL` on **20/20** sampled `*-mcp` repos, so
+    CI passing is enforced nowhere at the branch level. The janitor's
+    `gh pr checks` read is the only CI gate in the system, and it has been
+    wrong twice (#36, #38) with no defense in depth behind it.
+  - **#23 is an unclosed but currently-latent hole.** `classify()` retains the
+    blanket `grep -qiE '\bgroup\b' -> ELIGIBLE` title shortcut; #36 added only
+    a downstream guard for grouped PRs with *no* CI, so a grouped PR with
+    *green* CI still auto-merges on a title match. Measured: of the 118 PRs a
+    dry run would merge, 108 are grouped, and parsing every dependency out of
+    all 108 bodies found **0 cross-major and 0 unparseable** bumps — the groups
+    are update-type-scoped today, so the shortcut returns the right answer for
+    the wrong reason. Worth rebasing onto post-#36/#38 `main` as defence in
+    depth; not a blocker for re-enabling.
+  - **Release coupling, not the classifier, is what gates a safe first run.**
+    118 merges across 71 repos with `release.yml` still on `push: [main]` means
+    up to 71 semantic-release -> GHCR -> Azure deploys in one unbatched wave.
+  - **#22 is obsolete and would regress if merged.** It pins
+    `actions/checkout` to `v4.3.1`; `main` already SHA-pins `v6.0.3` via #24.
+    Close it, don't merge it.
+
 ### Fixed
 
 - **`agent-merge-janitor.sh`**: added a pre-flight unresolvable-repo guard,
