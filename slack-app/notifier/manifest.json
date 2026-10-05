@@ -1,0 +1,30 @@
+{
+  "display_information": {
+    "name": "WYRE Notifier",
+    "description": "Shared outbound bot for WYRE CI/automation notifications",
+    "background_color": "#1a1f36"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "wyre-notifier",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "chat:write.public",
+        "chat:write.customize",
+        "canvases:write",
+        "channels:history",
+        "channels:join"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

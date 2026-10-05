@@ -1,0 +1,69 @@
+name: Release sweeper
+
+# Ships the batch that mcp-server-release.yml's `gate` job holds back.
+#
+# The gate holds a release when EVERY commit since the last tag carries the
+# `Auto-Merged-By:` trailer — so an unattended janitor sweep cannot fire 71
+# semantic-release → GHCR → Azure deploys at 09:00 with nobody watching. But a
+# gate with no opener accumulates forever, which is worse than no gate: the
+# fleet would silently stop releasing. This is the opener.
+#
+# HOW IT OPENS THE GATE: pushes one empty `chore(release):` commit to each held
+# repo. That commit has no `Auto-Merged-By:` trailer, so the gate opens on the
+# resulting push and semantic-release sweeps every accumulated commit into one
+# release. `chore:` itself is not version-bumping, so the version reflects the
+# accumulated fix:/feat: commits, not this marker.
+#
+# Deliberately NOT `gh workflow run`: that needs `workflow_dispatch` on all 58
+# thin callers, which is the 58-repo edit this whole design avoids. An empty
+# commit needs nothing from the caller and leaves an auditable "this batch
+# shipped here" marker in history.
+
+on:
+  schedule:
+    - cron: '23 14 * * 1-5' # 10:23 America/New_York, weekdays — after the 09:00 janitor sweep
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List held repos without pushing anything'
+        type: boolean
+        default: true
+      repos:
+        description: 'Optional space-separated repo allowlist (default: all in scope)'
+        type: string
+        default: ''
+
+concurrency:
+  group: release-sweeper
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint org-wide installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout scripts
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Sweep held repos
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          # Review-driven fix: on the schedule trigger, inputs.dry_run does
+          # not exist (workflow_dispatch inputs are only populated for that
+          # event), and the original expression treated that as falsy ->
+          # DRY_RUN=false, so every scheduled fire defaulted to LIVE. Gate on
+          # event_name first so a missing input can never resolve to "live" --
+          # only an explicit workflow_dispatch with dry_run unchecked does.
+          DRY_RUN: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run != false }}
+          REPO_ALLOWLIST: ${{ inputs.repos }}
+        run: bash .github/scripts/release-sweeper.sh

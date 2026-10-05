@@ -104,15 +104,45 @@ name: MCP Server Release (reusable)
 #   itself for the full detail and why this is a new parallel job rather than
 #   a restructure of `release`'s own (unchanged) steps.
 #
+# SIXTH BUG FIXED: a non-fatal failure AFTER the release was cut skipped artifacts.
+#
+#   semantic-release creates the tag and GitHub release, then pushes git notes
+#   as its final action. A flaky/duplicate notes push ("cannot lock ref
+#   refs/notes/semantic-release-…: reference already exists") fails the
+#   Semantic Release step even though the release is already complete. The
+#   detect step (no `if:`) was then skipped, `released` was never set, and
+#   docker/registry/security all skipped — a published version with no image,
+#   no registry listing, and no deploy.
+#
+#   Fix: the detect step runs with `if: always()`, and docker gates on
+#   `always() && released == 'true'`. Detection keys off the tag-on-HEAD +
+#   GitHub release, not the step's exit code, so a post-release hiccup can't
+#   silently drop artifact publishing.
+#
+#   Scope note: the `mcpb` job below (added after this fix was first authored)
+#   has an analogous `needs.release.outputs.released == 'true'` gate without
+#   `always()`, and its own separately-named `id: detect` step checks for a
+#   `pack:mcpb` script — an unrelated purpose, not a duplicate of this
+#   release-detection logic. `mcpb`'s gate carries the same latent
+#   skip-on-post-release-hiccup exposure this fix closes for `docker`, but is
+#   deliberately left unchanged here — out of scope for this fix, flagged for
+#   a follow-up.
+#
 # GATING CONTRACT:
 #   verify       ← unconditional. Runs on push AND pull_request alike.
 #   release      ← push-to-main only, AND needs: [verify].
-#   docker       ← runs only when release.outputs.released == 'true'
-#   mcpb         ← same gate, but deliberately in its OWN job needing only
-#                  `release`. A pack failure must not cascade into skipping
-#                  docker/mcp-registry/security/deploy: the release is already
-#                  tagged and published by then, and a missing bundle is a far
-#                  smaller problem than a missing deploy.
+#   detect       ← always() so it runs even if Semantic Release exited non-zero
+#                  after cutting the release; sets released from tag-on-HEAD.
+#   docker       ← always() && released == 'true' (a red release job that still
+#                  cut a release must not skip the build).
+#   mcpb         ← same released == 'true' gate (without always(), see scope
+#                  note above), in its own job needing only `release`, so a pack
+#                  failure does not stop docker/mcp-registry/security from
+#                  running here. NOTE: that is workflow-internal only. Callers
+#                  invoke this file as ONE job, so any failure here fails the
+#                  caller's `release` job and skips a caller `deploy:
+#                  needs: release`. A pack failure IS deploy-blocking from the
+#                  caller's side — see the note above the mcpb job.
 #   mcp-registry ← always() ensures its `if:` is evaluated even when docker
 #                  was skipped; then guards on released == 'true' AND
 #                  docker result == 'success'.
@@ -158,6 +188,28 @@ on:
         description: 'Docker image digest (sha256:…). Empty when no release was cut.'
         value: ${{ jobs.docker.outputs.digest }}
 
+# CONCURRENCY (2026-08-25, murph/forge): no group meant near-simultaneous
+# pushes to a caller's main (e.g. two dependabot auto-merges seconds apart)
+# could run this workflow twice in parallel, both detect the same releasable
+# HEAD via the git-tag check above, and race the MCP Registry publish step —
+# confirmed live via the identical mechanism in meraki-mcp's legacy inline
+# workflow (WYRE-AI/meraki-mcp#12): 3 merges within 13s, 3 green Release runs,
+# 3 failed "cannot publish duplicate version" 400s. github.ref alone already
+# fully serializes this (same-repo, near-simultaneous pushes to main) — this
+# is a REUSABLE workflow, but GitHub scopes a concurrency group per-repository
+# automatically even for reusable workflows' own group declarations, so two
+# different callers computing the identical literal group string never queue
+# against each other (verified against GitHub's docs + community discussion
+# #88761 before writing this, not assumed). `github.repository` is included
+# anyway purely for a self-documenting group name in the Actions UI — it is
+# not required for correctness and fixes no additional bug.
+#
+# cancel-in-progress: false is deliberate — a queued run should wait for the
+# in-flight release/publish to finish, not cancel it mid-publish.
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # 0. verify — build/lint/test, UNCONDITIONAL (runs on every event this
@@ -198,6 +250,85 @@ jobs:
   #    existing `release` job's own unconditional `npm run build` either, so
   #    requiring it here changes nothing about what already had to hold true.
   # ────────────────────────────────────────────────────────────────────────────
+  # gate: decide whether THIS push should be allowed to cut a release.
+  #
+  # WHY: `dependabot-janitor` auto-merges across the fleet on a schedule. A dry
+  # run on 2026-08-17 would have merged 118 PRs across 71 repos in a single
+  # sweep — and because every caller's `release.yml` fires on `push: [main]`,
+  # that is up to 71 semantic-release → GHCR → Azure Container Apps deploys in
+  # one unbatched, unreviewed wave. These are credential brokers holding live
+  # customer API tokens; "main is briefly wrong" and "71 production containers
+  # rolled at 09:00 with nobody watching" are very different blast radii.
+  #
+  # RULE: hold the release only when EVERY commit since the last release tag
+  # carries the `Auto-Merged-By:` trailer. If a human merged anything in that
+  # range, they are taking responsibility for the release and the accumulated
+  # autonomous commits ship alongside it — which is the normal, desirable case
+  # and needs no ceremony.
+  #
+  # OPENING THE GATE: a held repo accumulates commits until something without
+  # the trailer lands. `release-sweeper.yml` in this repo does that on a daily
+  # schedule by pushing one `chore(release):` commit to each held repo, so a
+  # batch ships once a day with a human-auditable trigger point. A gate with no
+  # opener would accumulate forever, which is why the sweeper is not optional.
+  #
+  # Deliberately NOT implemented as a caller-side change: 58 thin callers would
+  # each need editing. This gates centrally and reaches the fleet by pin bump,
+  # the same mechanism the `mcpb` job restoration used.
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    outputs:
+      autonomous: ${{ steps.check.outputs.autonomous }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Classify commits since last release tag
+        id: check
+        env:
+          TRAILER: 'Auto-Merged-By'
+        run: |
+          set -euo pipefail
+          git fetch --tags --quiet || true
+
+          # Most recent semver tag reachable from HEAD. No tag => first release
+          # for this repo; never hold it (there is nothing to batch onto).
+          last_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -z "$last_tag" ]; then
+            echo "No previous release tag — not holding (first release)."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          range="${last_tag}..HEAD"
+          total="$(git rev-list --count "$range")"
+          if [ "$total" -eq 0 ]; then
+            echo "No commits since ${last_tag} — nothing to gate."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Count commits carrying the trailer. --format=%(trailers:key=...) is
+          # empty for commits without it, so grep -c on non-empty lines counts
+          # exactly the autonomous ones.
+          auto="$(git log "$range" --format="%(trailers:key=${TRAILER},valueonly)" \
+                  | grep -c '[^[:space:]]' || true)"
+
+          echo "Commits since ${last_tag}: ${total} (autonomous: ${auto})"
+          git log "$range" --format='  %h %s' | head -25
+
+          if [ "$auto" -eq "$total" ]; then
+            echo "::notice::All ${total} commit(s) since ${last_tag} are autonomous merges — holding release for the daily batch. release-sweeper.yml will ship these."
+            echo "autonomous=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$(( total - auto )) human-authored commit(s) in range — releasing normally (accumulated autonomous commits ship alongside)."
+            echo "autonomous=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify:
     name: Build, Lint, Test
     runs-on: ubuntu-latest
@@ -239,8 +370,15 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [verify]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [gate, verify]
+    # `gate` holds the release when every commit since the last tag is an
+    # autonomous merge — see the gate job's comment. Everything downstream
+    # (docker, mcpb, mcp-registry, security, and the caller's deploy) already
+    # keys off `release.outputs.released`, so holding here holds the whole
+    # chain with no further edits and no caller changes.
+    if: >
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.gate.outputs.autonomous != 'true'
     permissions:
       contents: write       # push tags + create GitHub releases
       issues: write         # @semantic-release/github creates release-linked issues
@@ -294,6 +432,16 @@ jobs:
 
       - name: Detect released version
         id: detect
+        # always() so detection still runs when the Semantic Release step exited
+        # non-zero AFTER cutting the release. semantic-release creates the tag and
+        # GitHub release, then pushes git notes as its final action; a flaky or
+        # duplicate notes push ("cannot lock ref refs/notes/semantic-release-…:
+        # reference already exists") fails the step even though the release is
+        # already complete. Detecting from the tag-on-HEAD + GitHub release (not
+        # the step's exit code) means such a hiccup can't silently skip the
+        # docker / registry / security jobs. A genuine pre-release failure leaves
+        # no tag on HEAD, so released stays false.
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -335,7 +483,13 @@ jobs:
     # produced an empty version output, docker still ran and hit the
     # "RELEASE_VERSION is empty" guard, silently cascading mcp-registry to
     # `skipped`. Now docker simply does not run unless a real release was cut.
-    if: needs.release.outputs.released == 'true'
+    #
+    # always() so a non-fatal failure in the release job (e.g. semantic-release's
+    # final git-notes push) can't skip the build once a release was actually cut.
+    # Without always(), a red release job skips docker regardless of the output;
+    # the released == 'true' guard (set by the always() detect step above) still
+    # prevents building on no-op pushes.
+    if: always() && needs.release.outputs.released == 'true'
     permissions:
       contents: read
       packages: write
@@ -499,8 +653,21 @@ jobs:
 
   # ────────────────────────────────────────────────────────────────────────────
   # 3. MCPB bundle → GitHub release asset
-  #    Needs only `release`, never `docker`, so a pack failure cannot cascade
-  #    into skipping the deploy chain (see GATING CONTRACT above).
+  #    Needs only `release`, never `docker`, so a pack failure does not stop
+  #    docker/mcp-registry/security from RUNNING inside this workflow.
+  #
+  #    IMPORTANT — this does NOT isolate the caller's deploy. A caller invokes
+  #    this whole file as a SINGLE job (`release: uses: …mcp-server-release.yml`),
+  #    so every job here rolls up into that one job's conclusion. Any failure
+  #    inside — including this one — marks the caller's `release` job failed,
+  #    and a caller `deploy: needs: release` is therefore SKIPPED. Observed on
+  #    atera-mcp: docker, mcp-registry and security all succeeded, mcpb failed,
+  #    and deploy was skipped anyway. An earlier revision of this comment
+  #    claimed a pack failure "cannot cascade into skipping the deploy chain";
+  #    that is true within this workflow and false from the caller's side.
+  #
+  #    So a bug in this job IS deploy-blocking. Keep it boring and keep it
+  #    tested against a repo that does NOT carry @anthropic-ai/mcpb.
   # ────────────────────────────────────────────────────────────────────────────
   mcpb:
     name: Pack and upload MCPB bundle
@@ -560,6 +727,24 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
         run: npm version "$VERSION" --no-git-tag-version --allow-same-version
 
+      # Pack scripts shell out to `npx mcpb pack`, which needs the mcpb CLI on
+      # PATH. Only 2 of the 26 repos with a pack:mcpb script (autotask-mcp,
+      # blumira-mcp) carry `@anthropic-ai/mcpb` as a dependency; in the other 24
+      # `npx mcpb` tries to fetch a package literally named "mcpb" from the
+      # public registry and dies with:
+      #   npm error 404 Not Found - GET https://registry.npmjs.org/mcpb
+      # The hand-rolled per-repo workflows all ran this global install for
+      # exactly that reason; this job originally omitted it, having been
+      # validated only against autotask-mcp — one of the two repos where the
+      # omission is invisible. Caught live on atera-mcp.
+      #
+      # `npx` resolves node_modules/.bin BEFORE the global prefix, so a repo
+      # that does pin its own @anthropic-ai/mcpb version still wins; this is a
+      # fallback, not an override.
+      - name: Install MCPB CLI
+        if: steps.detect.outputs.supported == 'true'
+        run: npm install -g @anthropic-ai/mcpb
+
       - name: Pack MCPB bundle
         if: steps.detect.outputs.supported == 'true'
         run: npm run pack:mcpb
@@ -614,11 +799,63 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag_name }}
 
-      - name: Install mcp-publisher
+      # SUPPLY-CHAIN FIX (fast-follow to the concurrency PR on this file;
+      # reported by murph while investigating an unrelated stale task about
+      # mcp-publisher signature verification):
+      #
+      #   This job holds `id-token: write` and MCP Registry publish rights.
+      #   The old install step curl'd `.../releases/latest/download/...` and
+      #   piped straight into `tar xz` with no version pin, no checksum, and
+      #   no signature check — if the upstream release pipeline (or a single
+      #   asset) were ever compromised, this would execute arbitrary code
+      #   with our publish credentials on every release, fleet-wide.
+      #
+      #   Fix: pin to an exact tag and verify the tarball against upstream's
+      #   own Sigstore keyless-signing bundle (cosign verify-blob) BEFORE
+      #   extracting or executing anything. Identity/issuer below were read
+      #   directly out of the certificate embedded in the real v1.8.1
+      #   mcp-publisher_linux_amd64.tar.gz.sigstore.json bundle (SAN URI +
+      #   OIDC issuer extension), not guessed:
+      #     SAN: https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/v1.8.1
+      #     Issuer: https://token.actions.githubusercontent.com
+      #   That bundle is produced by upstream's own `.goreleaser.yaml`
+      #   (`cosign sign-blob --bundle=...` in keyless mode) driven by
+      #   `.github/workflows/release.yml` on `release: published`, which
+      #   confirms the SAN's `@refs/tags/vX.Y.Z` shape is the actual signer,
+      #   not an assumption.
+      #
+      #   Hardcoded to linux_amd64: this job always runs on ubuntu-latest
+      #   (GitHub-hosted x86_64), so the old uname-based OS/arch detection is
+      #   unneeded complexity. If this workflow ever moves to an ARM runner,
+      #   MCP_PUBLISHER_ASSET below must change too — it will NOT
+      #   auto-detect the way the old curl command did.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Download mcp-publisher (pinned release)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
         run: |
-          curl -fsSL \
-            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" \
-            | tar xz mcp-publisher
+          BASE_URL="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl -fsSL -o "${MCP_PUBLISHER_ASSET}"               "${BASE_URL}/${MCP_PUBLISHER_ASSET}"
+          curl -fsSL -o "${MCP_PUBLISHER_ASSET}.sigstore.json" "${BASE_URL}/${MCP_PUBLISHER_ASSET}.sigstore.json"
+
+      - name: Verify mcp-publisher signature (cosign / Sigstore keyless)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
+        run: |
+          cosign verify-blob \
+            --bundle "${MCP_PUBLISHER_ASSET}.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${MCP_PUBLISHER_ASSET}"
+
+      - name: Extract mcp-publisher
+        env:
+          MCP_PUBLISHER_ASSET: mcp-publisher_linux_amd64.tar.gz
+        run: tar xz -f "${MCP_PUBLISHER_ASSET}" mcp-publisher
 
       - name: Stamp version into server.json
         # server.json is committed with "0.0.0" placeholders; replace with the

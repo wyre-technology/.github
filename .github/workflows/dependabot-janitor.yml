@@ -1,11 +1,19 @@
 name: Dependabot Janitor
 
 # Daily sweep that auto-merges green Dependabot patch/minor PRs across all
-# wyre-technology mcp-* and node-* repos. Majors, red CI, conflicts, and PRs
-# blocked by required code-owner review are reported, never merged.
+# mcp-* and node-* repos in ORGS (wyre-technology and WYRE-AI as of 2026-08-25
+# — the fleet split across both orgs; see dependabot-janitor.sh's own header
+# for the full story). Majors, red CI, conflicts, and PRs blocked by required
+# code-owner review are reported, never merged.
 #
 # Auth: a GitHub App installation token (APP_ID / APP_PRIVATE_KEY org secrets).
-# The app must have Contents: Read & write and Pull requests: Read & write.
+# The app must have Contents: Read & write and Pull requests: Read & write,
+# and — as of the dual-org fix — must be INSTALLED on both wyre-technology
+# and WYRE-AI, or token minting below will fail for whichever org it's not
+# installed on. Per boss (2026-08-25), the WYRE-AI install is a pending Aaron
+# ask already tracked outside this repo — if this workflow starts failing on
+# "Mint org-wide installation token" with a WYRE-AI-related error, that's the
+# likely cause, not a bug in this file.
 
 on:
   schedule:
@@ -34,6 +42,19 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          # NOT yet expanded to WYRE-AI: verified live (2026-08-25) via
+          # `gh api orgs/WYRE-AI/installations` that the wyre-projects-bot App
+          # (app_id 3588278, the one APP_ID/APP_PRIVATE_KEY mint tokens for) is
+          # NOT installed on WYRE-AI — only digitalocean, blacksmith-sh, vanta,
+          # and two infisical apps are. Adding `WYRE-AI` to `owner:` here before
+          # that install exists would very likely fail token minting outright
+          # (untested whether create-github-app-token degrades gracefully to a
+          # partial-org token or hard-fails on a missing installation — not
+          # worth risking on the currently-working wyre-technology half to find
+          # out). Script-side ORGS support (dependabot-janitor.sh) is ready for
+          # WYRE-AI; this `owner:` line is the one line still gating it. Add
+          # `WYRE-AI` here once the App install is confirmed, nothing else
+          # in this file needs to change.
           owner: ${{ github.repository_owner }}
 
       - name: Check out scripts
@@ -45,9 +66,25 @@ jobs:
       - name: Run janitor
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ORG: ${{ github.repository_owner }}
+          # Was ORG: ${{ github.repository_owner }} — that pinned this to
+          # wyre-technology only and silently overrode dependabot-janitor.sh's
+          # own ORGS default (see that file's header). Removed so the script's
+          # "wyre-technology WYRE-AI" default takes effect. The token above is
+          # NOT yet valid for WYRE-AI (App not installed there — see the
+          # token-minting step's comment), so every WYRE-AI repo will show up
+          # in this run's Errors section ("pr list failed") until that install
+          # lands — expected, isolated per-repo, and won't affect wyre-technology
+          # repos. That's the intended interim state: visible and diagnosable
+          # instead of silently scanning 13 of 63 repos with no error at all.
           DRY_RUN: ${{ inputs.dry_run }}
           BACKLOG_FILE: dependabot-backlog.md
+          # 2026-08-21: all 25 repos originally held out (see task_1786765529531
+          # for why this janitor was disabled 07-21, and .github#57 for the
+          # exclusion mechanism itself) have now had their mcp-server-release.yml/
+          # mcp-server-deploy.yml pins migrated past the pre-fix SHA with real
+          # red/green CI confirmed on each migration PR. EXCLUDE_REPOS empty as
+          # of PR .github#64 -- mechanism left in place for any future repo that
+          # needs the same vacuous-CI protection.
         run: bash .github/scripts/dependabot-janitor.sh
 
       - name: Commit backlog if changed

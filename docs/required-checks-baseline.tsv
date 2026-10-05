@@ -1,0 +1,32 @@
+afkbot-mcp	assert / assert|Build on Node.js 20.x|Build on Node.js 22.x	
+autotask-mcp	assert / assert|Code Quality|Test on Node.js 20.x|Test on Node.js 22.x	.github/dependabot.yml
+auvik-mcp	assert / assert|test (22)	docker-build|test (20)
+avanan-legacy-mcp	Test (22)	Test (20)
+blackpoint-mcp	build	
+blumira-mcp	Code Quality|Test on Node.js 22.x	Test on Node.js 20.x
+clio-mcp	test (20)|test (22)	
+connectwise-automate-mcp	assert / assert|test (20.x)|test (22.x)	
+datto-bcdr-mcp	build	release / Build, Lint, Test
+datto-rmm-mcp	assert / assert|build	release / Build, Lint, Test
+datto-saas-protection-mcp	build	release / Build, Lint, Test
+hudu-mcp	assert / assert|Test on Node.js 18.x|Test on Node.js 20.x|Test on Node.js 22.x	
+huntress-mcp	assert / assert|Code Quality|Test on Node.js 20.x|Test on Node.js 22.x	release / Build, Lint, Test
+immybot-mcp	build	
+inforcer-mcp	assert / assert|Code Quality|Test on Node.js 18.x|Test on Node.js 20.x	Test on Node.js 22.x
+iqms-mcp	Test / Test (Node 20)|Test / Test (Node 22)	
+itglue-mcp	assert / assert|build	release / Build, Lint, Test
+kaseya-bms-mcp	build	release / Build, Lint, Test
+kaseya-quote-manager-mcp	assert / assert|Code Quality	release / Build, Lint, Test|Test on Node.js 18.x|Test on Node.js 20.x|Test on Node.js 22.x
+kaseya-vsa-mcp	build	release / Build, Lint, Test
+liongard-mcp	assert / assert|build (20)|build (22)	release / Build, Lint, Test
+ncentral-mcp	test (20)|test (22)	
+qbo-mcp	assert / assert|integration	release / Build, Lint, Test
+rocketcyber-mcp	assert / assert|Test on Node.js 20.x|Test on Node.js 22.x	Test on Node.js 18.x
+rootly-mcp	assert / assert|Test / Test (Node 20)|Test / Test (Node 22)	
+saas-alerts-mcp	assert / assert|Code Quality|Test on Node.js 18.x|Test on Node.js 20.x|Test on Node.js 22.x	
+salesbuildr-mcp	assert / assert|test (22.x)	release / Build, Lint, Test
+spanning-mcp	build	release / Build, Lint, Test
+superops-mcp	assert / assert|build (20.x)|build (22.x)	release / Build, Lint, Test
+threatlocker-mcp	build	release / Build, Lint, Test
+timezest-mcp	build	
+unitrends-mcp	build	release / Build, Lint, Test
