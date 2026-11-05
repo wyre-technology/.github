@@ -8,6 +8,53 @@ here. The format is based on
 
 ### Fixed
 
+- **`dependabot-janitor.yml`/`.sh`**: fixed a silent WYRE-AI write-auth
+  failure that had merged zero PRs org-wide for a month and mislabeled the
+  cause (murph, task_1793893256342_67059595, infra's verified finding at
+  `deliverables/infra/task_1793892447699_94350289/findings.md`). The
+  workflow minted a single org-wide token from `wyre-projects-bot`, an App
+  installed on `wyre-technology` only (confirmed live via `gh api
+  orgs/<org>/installations`, 2026-11-05). WYRE-AI repos are all public, so
+  every *read* (`gh pr list`, `gh pr checks`) kept succeeding regardless —
+  but every *write* (`gh pr review --approve`, `gh pr merge`) failed, and the
+  approve call was never exit-code-checked (`>/dev/null 2>&1`). A failed,
+  invisible approve left the review requirement unsatisfied, so the
+  subsequent merge attempt's real rejection ("review required") matched the
+  same grep this script uses to classify genuine code-owner blocks —
+  producing an identical-looking "Blocked — needs your approval (code-owner)"
+  entry for both cases. 99 of 271 PRs in that bucket (2026-11-05 count) were
+  on repos where `task_1791226258261_69292938`'s 2026-10-05 rollout had
+  already disabled `require_code_owner_reviews` — they had no real
+  code-owner gate left at all, just a silently-broken auth path.
+
+  Two-part fix: (1) `gh pr review --approve`'s exit code is now checked; a
+  failure routes straight to the `Errors` bucket with the real error text and
+  skips the merge attempt entirely, rather than letting a doomed merge call
+  produce a misleading classification. (2) the workflow now mints **two**
+  org-scoped tokens — `wyre-projects-bot` for `wyre-technology` (unchanged)
+  and `wyre-agent-fleet` for `WYRE-AI` (installation 158846229, confirmed
+  `repository_selection: all` + `pull_requests: write`, same App/secret names
+  already used by `WYRE-AI/.github`'s copy of `github-activity-notifier.yml`)
+  — and `dependabot-janitor.sh` picks the right one per repo via a new
+  `token_for_org()` helper (`GH_TOKEN_WYRE_TECHNOLOGY` / `GH_TOKEN_WYRE_AI`,
+  falling back to a single `GH_TOKEN` for back-compat local runs).
+
+  Verified end-to-end with a stubbed `gh` (two fake repos, one per org, one
+  approve configured to fail): the wyre-technology PR merges normally and
+  the WYRE-AI PR lands in `Errors` with its real cause, not `Blocked`. All
+  14 pre-existing `classify()`/`major_of()` unit tests pass unchanged; 4 new
+  `token_for_org()` tests added.
+
+  **Not yet confirmed**: whether `AGENT_FLEET_APP_ID`/
+  `AGENT_FLEET_APP_PRIVATE_KEY` already exist as secrets visible to
+  `wyre-technology/.github` (same values as `WYRE-AI/.github`'s copy —
+  a GitHub App's private key is global to the App, not per-org). Minting a
+  WYRE-AI-scoped token locally to check was blocked by the standing
+  `OP_SERVICE_ACCOUNT_TOKEN` outage (`task_1793062101039_15116170`) at write
+  time. If unset, the new "Mint WYRE-AI installation token" step fails
+  loudly on the next scheduled run — correct fail-closed behavior, but
+  someone with org-secret access should add them before/at merge.
+
 - **`agent-merge-janitor.sh`**: added a pre-flight unresolvable-repo guard,
   closing a silent blind spot (murph, task_1788354182960_04095147). `conduit`
   moved from `wyre-technology` to the `WYRE-AI` org on 2026-08-25, and `gh pr
