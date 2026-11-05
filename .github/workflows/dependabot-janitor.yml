@@ -6,14 +6,29 @@ name: Dependabot Janitor
 # for the full story). Majors, red CI, conflicts, and PRs blocked by required
 # code-owner review are reported, never merged.
 #
-# Auth: a GitHub App installation token (APP_ID / APP_PRIVATE_KEY org secrets).
-# The app must have Contents: Read & write and Pull requests: Read & write,
-# and — as of the dual-org fix — must be INSTALLED on both wyre-technology
-# and WYRE-AI, or token minting below will fail for whichever org it's not
-# installed on. Per boss (2026-08-25), the WYRE-AI install is a pending Aaron
-# ask already tracked outside this repo — if this workflow starts failing on
-# "Mint org-wide installation token" with a WYRE-AI-related error, that's the
-# likely cause, not a bug in this file.
+# Auth: TWO GitHub App installation tokens, one per org (2026-11-05,
+# task_1793893256342_67059595 — see dependabot-janitor.sh's header for the
+# full incident: a single wyre-technology-only token silently failed every
+# WRITE on WYRE-AI for a month while reads kept working on WYRE-AI's public
+# repos, and the resulting review-approval failures got misclassified as
+# code-owner blocks). wyre-projects-bot (APP_ID/APP_PRIVATE_KEY secrets) is
+# installed on wyre-technology only. wyre-agent-fleet (AGENT_FLEET_APP_ID/
+# AGENT_FLEET_APP_PRIVATE_KEY secrets — same secret names and values as the
+# WYRE-AI/.github copy of github-activity-notifier.yml, which already mints
+# from this App) is installed on WYRE-AI only, confirmed live via `gh api
+# orgs/WYRE-AI/installations` 2026-11-05: repository_selection=all,
+# permissions include contents:write + pull_requests:write + packages:write.
+# PRE-MERGE CHECK (infra/Aaron, not verifiable by the author of this PR —
+# minting WYRE-AI-scoped tokens locally was blocked by the standing
+# OP_SERVICE_ACCOUNT_TOKEN outage, task_1793062101039_15116170, at write
+# time): confirm AGENT_FLEET_APP_ID / AGENT_FLEET_APP_PRIVATE_KEY already
+# exist as secrets visible to wyre-technology/.github's workflows (org-level
+# secret inherited, or add them at repo level here) — a GitHub App's private
+# key is global to the App regardless of which org's Actions runner uses it
+# to mint, so the same WYRE-AI/.github secret values work here unchanged if
+# copied over. If they're not yet set, this workflow's new "Mint WYRE-AI
+# installation token" step will fail loudly (unlike the bug this PR fixes),
+# which is the correct fail-closed behavior until they are.
 
 on:
   schedule:
@@ -36,46 +51,50 @@ jobs:
   janitor:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint org-wide installation token
+      - name: Mint wyre-technology installation token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          # NOT yet expanded to WYRE-AI: verified live (2026-08-25) via
-          # `gh api orgs/WYRE-AI/installations` that the wyre-projects-bot App
-          # (app_id 3588278, the one APP_ID/APP_PRIVATE_KEY mint tokens for) is
-          # NOT installed on WYRE-AI — only digitalocean, blacksmith-sh, vanta,
-          # and two infisical apps are. Adding `WYRE-AI` to `owner:` here before
-          # that install exists would very likely fail token minting outright
-          # (untested whether create-github-app-token degrades gracefully to a
-          # partial-org token or hard-fails on a missing installation — not
-          # worth risking on the currently-working wyre-technology half to find
-          # out). Script-side ORGS support (dependabot-janitor.sh) is ready for
-          # WYRE-AI; this `owner:` line is the one line still gating it. Add
-          # `WYRE-AI` here once the App install is confirmed, nothing else
-          # in this file needs to change.
-          owner: ${{ github.repository_owner }}
+          # wyre-projects-bot (app_id 3588278) is installed on wyre-technology
+          # only — see dependabot-janitor.sh's header for the full dual-org
+          # story and the 2026-11-05 incident this two-token split fixes.
+          owner: wyre-technology
+
+      - name: Mint WYRE-AI installation token
+        id: app-token-wyre-ai
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AGENT_FLEET_APP_ID }}
+          private-key: ${{ secrets.AGENT_FLEET_APP_PRIVATE_KEY }}
+          # wyre-agent-fleet (installation 158846229) is installed on WYRE-AI
+          # only — confirmed live 2026-11-05 via `gh api
+          # orgs/WYRE-AI/installations` (repository_selection=all,
+          # pull_requests:write present). Same App/secrets the WYRE-AI/.github
+          # copy of github-activity-notifier.yml already mints from.
+          owner: WYRE-AI
 
       - name: Check out scripts
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Persist the app token so the backlog commit can push back to .github.
+          # Persist the wyre-technology app token so the backlog commit can
+          # push back to THIS repo (wyre-technology/.github) — the WYRE-AI
+          # token has no installation grant here and isn't relevant to this step.
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Run janitor
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN_WYRE_TECHNOLOGY: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN_WYRE_AI: ${{ steps.app-token-wyre-ai.outputs.token }}
           # Was ORG: ${{ github.repository_owner }} — that pinned this to
           # wyre-technology only and silently overrode dependabot-janitor.sh's
           # own ORGS default (see that file's header). Removed so the script's
-          # "wyre-technology WYRE-AI" default takes effect. The token above is
-          # NOT yet valid for WYRE-AI (App not installed there — see the
-          # token-minting step's comment), so every WYRE-AI repo will show up
-          # in this run's Errors section ("pr list failed") until that install
-          # lands — expected, isolated per-repo, and won't affect wyre-technology
-          # repos. That's the intended interim state: visible and diagnosable
-          # instead of silently scanning 13 of 63 repos with no error at all.
+          # "wyre-technology WYRE-AI" default takes effect. Both tokens above
+          # are now org-scoped correctly (see dependabot-janitor.sh's
+          # token_for_org()) — unlike the pre-2026-11-05 single-token setup,
+          # WYRE-AI repos get a token with real write access, not just one
+          # that happens to pass read-only public-repo calls.
           DRY_RUN: ${{ inputs.dry_run }}
           BACKLOG_FILE: dependabot-backlog.md
           # 2026-08-21: all 25 repos originally held out (see task_1786765529531

@@ -7,10 +7,37 @@
 # but never merged. A green test suite is treated as sufficient proof for dev/CI
 # tooling (it doesn't ship at runtime); runtime majors always need a human.
 #
-# Requires: gh CLI authenticated via GH_TOKEN (a GitHub App installation token with
-# contents:write + pull_requests:write across every org in ORGS).
+# Requires: gh CLI authenticated via per-org GH_TOKEN_<ORG> env vars (GitHub App
+# installation tokens with contents:write + pull_requests:write). TWO APPS as of
+# 2026-11-05 (task_1793893256342_67059595, infra's findings.md under
+# deliverables/infra/task_1793892447699_94350289/): wyre-projects-bot
+# (app_id 3588278) is installed on wyre-technology only; wyre-agent-fleet
+# (installation 158846229) is installed on WYRE-AI only (repository_selection:
+# all, confirmed live via `gh api orgs/<org>/installations` the same day). A
+# single org-wide GH_TOKEN minted from wyre-projects-bot (the pre-fix setup)
+# authenticated fine for READS on WYRE-AI repos — they're all public, so any
+# token or none works for `gh pr list`/`gh pr checks` — but every WRITE
+# (`gh pr review --approve`, `gh pr merge`) failed silently on every WYRE-AI
+# repo, because the App has no installation grant there at all. The approve
+# call was never exit-code-checked (`>/dev/null 2>&1`), so the failure was
+# invisible; the subsequent merge's real rejection ("review required", since
+# the approval never actually landed) then grep-classified into the SAME
+# "Blocked — needs your approval (code-owner)" bucket a genuine branch-
+# protection block produces. Net effect: 99 of 271 "code-owner-blocked" PRs
+# (2026-11-05 count) were actually a silently-broken auth path on repos that
+# in truth had NO code-owner gate left (task_1791226258261's 2026-10-05
+# rollout had already disabled it on all 33 of them) — zero merges landed
+# org-wide on WYRE-AI for a month and the report never said why.
 #
 # Env:
+#   GH_TOKEN_WYRE_TECHNOLOGY   installation token for the wyre-technology App
+#                  (wyre-projects-bot). Required for any wyre-technology repo.
+#   GH_TOKEN_WYRE_AI           installation token for the WYRE-AI App
+#                  (wyre-agent-fleet). Required for any WYRE-AI repo.
+#   GH_TOKEN       back-compat fallback used for any org with no matching
+#                  GH_TOKEN_<ORG> var set (e.g. local ad-hoc testing with a
+#                  single PAT that happens to cover both). Prefer the two
+#                  org-specific vars above in CI — see token_for_org() below.
 #   ORGS           space-separated GitHub orgs to scan (default: "wyre-technology
 #                  WYRE-AI"). 2026-08-25: the *-mcp fleet moved from being entirely
 #                  under wyre-technology to being split across both orgs (63
@@ -46,6 +73,16 @@ ORGS="${ORG:-${ORGS:-wyre-technology WYRE-AI}}"
 DRY_RUN="${DRY_RUN:-false}"
 EXCLUDE_REPOS="${EXCLUDE_REPOS:-}"
 
+# Per-org token lookup (see the two-App header note above). Normalizes an org
+# name to the env-var-safe form (hyphens -> underscores, uppercased) and falls
+# back to the shared $GH_TOKEN if no org-specific var is set, so a single-token
+# local run (e.g. `GH_TOKEN=... ORG=wyre-technology bash dependabot-janitor.sh`)
+# still works unchanged.
+token_for_org() {
+  local var="GH_TOKEN_$(tr '[:lower:]-' '[:upper:]_' <<<"$1")"
+  printf '%s' "${!var:-${GH_TOKEN:-}}"
+}
+
 work="$(mktemp -d)"
 for cat in merged majors red pending conflicts blocked errors nocheck; do : > "$work/$cat"; done
 
@@ -62,7 +99,7 @@ for cat in merged majors red pending conflicts blocked errors nocheck; do : > "$
 # names), which is the conservative direction to fail in.
 mapfile -t REPOS < <(
   for _org in $ORGS; do
-    gh api --paginate "/orgs/$_org/repos?per_page=100" \
+    GH_TOKEN="$(token_for_org "$_org")" gh api --paginate "/orgs/$_org/repos?per_page=100" \
       --jq '.[] | select(.archived==false) | .name' \
     | grep -E '(-mcp$|^mcp|^node-|^cortextos$|^conduit$)' \
     | sed "s|^|$_org/|"
@@ -116,6 +153,8 @@ classify() {
     # that would double or misdirect the org, same footgun noted at the merge
     # call below.
     local body line deps=0 ok=0
+    # GH_TOKEN is exported per-repo by the main loop below (token_for_org on
+    # $repo's org) before classify() is ever called, so no override needed here.
     body="$(gh api "repos/$repo/pulls/$num" --jq '.body // ""' 2>/dev/null </dev/null)" || { echo MAJOR; return; }
     [[ -n "$body" ]] || { echo MAJOR; return; }   # empty/absent body -> fail-closed
     while IFS= read -r line; do
@@ -165,6 +204,11 @@ is_dev_major() {
 }
 
 for repo in "${REPOS[@]}"; do
+  # Export the right App's token for this repo's org once, for the whole
+  # iteration (pr list/checks/review/merge, plus classify()'s internal `gh
+  # api` call, all inherit it) -- see token_for_org() and the file header.
+  export GH_TOKEN="$(token_for_org "${repo%%/*}")"
+
   prs="$(gh pr list -R "$repo" --author 'app/dependabot' --state open \
         --json number,title,mergeable 2>/dev/null)" || { echo "$repo: pr list failed" >>"$work/errors"; continue; }
   [[ "$(jq 'length' <<<"$prs")" == "0" ]] && continue
@@ -242,8 +286,23 @@ for repo in "${REPOS[@]}"; do
     fi
 
     # Approve (satisfies non-code-owner review requirements) then squash-merge.
-    gh pr review "$num" -R "$repo" --approve \
-      -b "Auto-approved by Dependabot janitor: CI green (patch/minor, or dev/CI-tooling major)." >/dev/null 2>&1
+    #
+    # The approve call's exit code MUST be checked. A silently-discarded
+    # failure here (previously `>/dev/null 2>&1`, no check at all) is exactly
+    # what hid 99 WYRE-AI PRs as "code-owner-blocked" for a month: when the
+    # approve fails (e.g. the minted token's App has no installation on this
+    # repo's org), the review requirement is never actually satisfied, the
+    # subsequent merge attempt then fails with a genuine "review required"
+    # error, and that error's text matches the SAME grep this script uses to
+    # classify real code-owner blocks -- making an auth failure and a real
+    # branch-protection block indistinguishable in the report. Refuse to
+    # guess which one happened: surface the approve error directly and do
+    # not attempt the merge at all, since we already know it cannot succeed.
+    if ! approve_err="$(gh pr review "$num" -R "$repo" --approve \
+        -b "Auto-approved by Dependabot janitor: CI green (patch/minor, or dev/CI-tooling major)." 2>&1)"; then
+      echo "$repo #$num: approve failed, not attempting merge (not classified as code-owner-blocked): $(tr '\n' ' ' <<<"$approve_err" | head -c 160)" >>"$work/errors"
+      continue
+    fi
     # The `Auto-Merged-By:` trailer is what mcp-server-release.yml's `gate` job
     # reads to decide whether a push to main may cut a release. When EVERY commit
     # since the last tag carries it, the release is held for the daily batch

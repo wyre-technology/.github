@@ -33,12 +33,15 @@ else
   exit 1
 fi
 
-# major_of() is a one-liner (its closing brace is not at column 0), so it gets a
-# single-line print. Using a /,/^}/ range for it would run on and swallow
-# classify() as well, then the second range would emit classify() a second time —
-# producing duplicated, syntactically broken input to eval.
-eval "$(sed -n '/^major_of()/p; /^classify()/,/^}/p' "$SCRIPT")"
+# major_of() is a one-liner (closing brace not at column 0), so it gets a
+# single-line print. token_for_org() and classify() are multi-line, each
+# extracted by its own /,/^}/ range -- doing all three ranges in one sed
+# program (rather than one range spanning major_of() through classify())
+# avoids swallowing everything in between as duplicated, syntactically broken
+# input to eval.
+eval "$(sed -n '/^major_of()/p; /^token_for_org()/,/^}/p; /^classify()/,/^}/p' "$SCRIPT")"
 declare -F classify >/dev/null || { echo "FATAL: could not extract classify() from $SCRIPT" >&2; exit 1; }
+declare -F token_for_org >/dev/null || { echo "FATAL: could not extract token_for_org() from $SCRIPT" >&2; exit 1; }
 
 pass=0; fail=0
 BODY=""
@@ -118,6 +121,30 @@ Updates `bad-pkg` from notasemver to 2.0.0
 '
 check "partial parse does not pass as all-clean -> MAJOR" MAJOR \
   'bump the x group with 2 updates'
+
+echo
+echo "token_for_org() — per-org var lookup + fallback (2026-11-05, task_1793893256342_67059595)"
+tcheck() { # tcheck <desc> <expected> <org>
+  local desc="$1" want="$2" org="$3" got
+  got="$(token_for_org "$org")"
+  if [[ "$got" == "$want" ]]; then
+    pass=$((pass+1)); printf '  ok   %s\n' "$desc"
+  else
+    fail=$((fail+1)); printf '  FAIL %s — want %q, got %q\n' "$desc" "$want" "$got"
+  fi
+}
+# No subshells here -- pass/fail are plain shell vars, and a subshell's
+# increments vanish when it exits, undercounting the total silently (caught
+# by eyeballing "ok" lines against the final tally not matching, while
+# writing this test -- the same "clean per-line output, wrong aggregate"
+# shape this fleet's CLAUDE.md already warns about elsewhere).
+export GH_TOKEN_WYRE_TECHNOLOGY=tok-wt GH_TOKEN_WYRE_AI=tok-wai GH_TOKEN=tok-fallback
+tcheck "wyre-technology -> its own token"        tok-wt  wyre-technology
+tcheck "WYRE-AI -> its own token"                tok-wai WYRE-AI
+tcheck "unknown org -> falls back to GH_TOKEN"   tok-fallback some-other-org
+unset GH_TOKEN_WYRE_TECHNOLOGY GH_TOKEN_WYRE_AI
+export GH_TOKEN=tok-only
+tcheck "no per-org var set -> falls back to GH_TOKEN" tok-only wyre-technology
 
 echo
 printf 'passed=%d failed=%d\n' "$pass" "$fail"
